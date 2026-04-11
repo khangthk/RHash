@@ -37,6 +37,10 @@
 #include <stddef.h>
 #include <string.h>
 
+#if defined(_WIN32)
+# include <io.h>
+#endif
+
 #define STATE_ACTIVE  0xb01dbabe
 #define STATE_STOPPED 0xdeadbeef
 #define STATE_DELETED 0xdecea5ed
@@ -47,9 +51,12 @@
 #define RHPR_FORMAT (RHPR_RAW | RHPR_HEX | RHPR_BASE32 | RHPR_BASE64)
 #define RHPR_MODIFIER (RHPR_UPPERCASE | RHPR_URLENCODE | RHPR_REVERSE)
 
+#define IS_VALID_EXTENDED_HASH_ID(id) (GET_EXTENDED_HASH_ID_INDEX(id) < RHASH_HASH_COUNT)
 #define HAS_ZERO_OR_ONE_BIT(id) (((id) & ((id) - 1)) == 0)
-#define IS_VALID_HASH_MASK(bitmask) ((bitmask) != 0 && ((bitmask) & ~RHASH_ALL_HASHES) == 0)
-#define IS_VALID_HASH_ID(id) (IS_VALID_HASH_MASK(id) && HAS_ZERO_OR_ONE_BIT(id))
+#define IS_VALID_HASH_MASK(bitmask) ((bitmask) != 0 && ((bitmask) & ~RHASH_LOW_HASHES_MASK) == 0)
+#define IS_VALID_HASH_ID(id) (IS_EXTENDED_HASH_ID(id) ? IS_VALID_EXTENDED_HASH_ID(id) : \
+	IS_VALID_HASH_MASK(id) && HAS_ZERO_OR_ONE_BIT(id))
+#define EXTENDED_HASH_ID_FROM_BIT64(bit) ((unsigned)RHASH_EXTENDED_BIT ^ rhash_ctz64(bit))
 
 /* each hash function context must be aligned to DEFAULT_ALIGNMENT bytes */
 #define GET_CTX_ALIGNED(size) ALIGN_SIZE_BY((size), DEFAULT_ALIGNMENT)
@@ -57,7 +64,7 @@
 
 RHASH_API void rhash_library_init(void)
 {
-	rhash_init_algorithms(RHASH_ALL_HASHES);
+	rhash_init_algorithms();
 #ifdef USE_OPENSSL
 	rhash_plug_openssl();
 #endif
@@ -82,28 +89,28 @@ RHASH_API int rhash_count(void)
  */
 static rhash_context_ext* rhash_alloc_multi(size_t count, const unsigned hash_ids[], int need_init)
 {
-	struct rhash_hash_info* info;   /* hash algorithm information */
 	rhash_context_ext* rctx = NULL; /* allocated rhash context */
 	const size_t header_size = GET_CTX_ALIGNED(sizeof(rhash_context_ext) + sizeof(rhash_vector_item) * count);
 	size_t ctx_size_sum = 0;   /* size of hash contexts to store in rctx */
 	size_t i;
 	char* phash_ctx;
-	unsigned hash_bitmask = 0;
+	uint64_t hash_bitmask = 0;
 
 	if (count < 1) {
 		errno = EINVAL;
 		return NULL;
 	}
+	if (count == 1 && hash_ids[0] == RHASH_ALL_HASHES)
+		hash_ids = rhash_get_all_hash_ids(hash_ids[0], &count);
 	for (i = 0; i < count; i++) {
-		unsigned hash_index;
-		if (!IS_VALID_HASH_ID(hash_ids[i])) {
+		const rhash_hash_info* info = rhash_hash_info_by_id(hash_ids[i]);
+		if (!info) {
 			errno = EINVAL;
 			return NULL;
 		}
-		hash_bitmask |= hash_ids[i];
-		hash_index = rhash_ctz(hash_ids[i]);
-		assert(hash_index < RHASH_HASH_COUNT); /* correct until extended hash_ids are supported */
-		info = &rhash_info_table[hash_index];
+		assert(IS_EXTENDED_HASH_ID(info->info->hash_id));
+		assert(IS_VALID_EXTENDED_HASH_ID(info->info->hash_id));
+		hash_bitmask |= I64(1) << GET_EXTENDED_HASH_ID_INDEX(info->info->hash_id);
 
 		/* align context sizes and sum up */
 		ctx_size_sum += GET_CTX_ALIGNED(info->context_size);
@@ -116,10 +123,10 @@ static rhash_context_ext* rhash_alloc_multi(size_t count, const unsigned hash_id
 
 	/* initialize common fields of the rhash context */
 	memset(rctx, 0, header_size);
-	rctx->rc.hash_id = hash_bitmask;
+	rctx->rc.hash_mask = hash_bitmask;
 	rctx->flags = RCTX_AUTO_FINAL; /* turn on auto-final by default */
 	rctx->state = STATE_ACTIVE;
-	rctx->hash_vector_size = count;
+	rctx->hash_vector_size = (unsigned)count;
 
 	/* calculate aligned pointer >= (&rctx->vector[count]) */
 	phash_ctx = (char*)rctx + header_size;
@@ -127,8 +134,8 @@ static rhash_context_ext* rhash_alloc_multi(size_t count, const unsigned hash_id
 	assert(phash_ctx < ((char*)&rctx->vector[count] + DEFAULT_ALIGNMENT));
 
 	for (i = 0; i < count; i++) {
-		unsigned hash_index = rhash_ctz(hash_ids[i]);
-		info = &rhash_info_table[hash_index];
+		const rhash_hash_info* info = rhash_hash_info_by_id(hash_ids[i]);
+		assert(info != NULL);
 		assert(info->context_size > 0);
 		assert(info->init != NULL);
 		assert(IS_PTR_ALIGNED_BY(phash_ctx, DEFAULT_ALIGNMENT)); /* hash context is aligned */
@@ -137,7 +144,7 @@ static rhash_context_ext* rhash_alloc_multi(size_t count, const unsigned hash_id
 		rctx->vector[i].context = phash_ctx;
 
 		/* BTIH initialization is a bit complicated, so store the context pointer for later usage */
-		if ((hash_ids[i] & RHASH_BTIH) != 0)
+		if (info->info->hash_id == EXTENDED_BTIH)
 			rctx->bt_ctx = phash_ctx;
 		phash_ctx += GET_CTX_ALIGNED(info->context_size);
 
@@ -156,11 +163,16 @@ RHASH_API rhash rhash_init_multi(size_t count, const unsigned hash_ids[])
 
 RHASH_API rhash rhash_init(unsigned hash_id)
 {
-	if (!IS_VALID_HASH_MASK(hash_id)) {
+	if (hash_id == RHASH_ALL_HASHES || hash_id == RHASH_LOW_HASHES_MASK) {
+		size_t count;
+		const unsigned* hash_ids = rhash_get_all_hash_ids(hash_id, &count);
+		return rhash_init_multi(count, hash_ids);
+	}
+	if (!IS_EXTENDED_HASH_ID(hash_id) && !IS_VALID_HASH_MASK(hash_id)) {
 		errno = EINVAL;
 		return NULL;
 	}
-	if (HAS_ZERO_OR_ONE_BIT(hash_id)) {
+	if (IS_EXTENDED_HASH_ID(hash_id) || HAS_ZERO_OR_ONE_BIT(hash_id)) {
 		return rhash_init_multi(1, &hash_id);
 	} else {
 		/* handle the deprecated case, when hash_id is a bitwise union of several hash function identifiers */
@@ -187,7 +199,7 @@ void rhash_free(rhash ctx)
 
 	/* clean the hash functions, which require additional clean up */
 	for (i = 0; i < ectx->hash_vector_size; i++) {
-		struct rhash_hash_info* info = ectx->vector[i].hash_info;
+		const struct rhash_hash_info* info = ectx->vector[i].hash_info;
 		if (info->cleanup != 0) {
 			info->cleanup(ectx->vector[i].context);
 		}
@@ -205,7 +217,7 @@ RHASH_API void rhash_reset(rhash ctx)
 
 	/* re-initialize every hash in a loop */
 	for (i = 0; i < ectx->hash_vector_size; i++) {
-		struct rhash_hash_info* info = ectx->vector[i].hash_info;
+		const struct rhash_hash_info* info = ectx->vector[i].hash_info;
 		if (info->cleanup != 0) {
 			info->cleanup(ectx->vector[i].context);
 		}
@@ -230,7 +242,7 @@ RHASH_API int rhash_update(rhash ctx, const void* message, size_t length)
 
 	/* call update method for every algorithm */
 	for (i = 0; i < ectx->hash_vector_size; i++) {
-		struct rhash_hash_info* info = ectx->vector[i].hash_info;
+		const struct rhash_hash_info* info = ectx->vector[i].hash_info;
 		assert(info->update != 0);
 		info->update(ectx->vector[i].context, message, length);
 	}
@@ -251,7 +263,7 @@ RHASH_API int rhash_final(rhash ctx, unsigned char* first_result)
 
 	/* call final method for every algorithm */
 	for (i = 0; i < ectx->hash_vector_size; i++) {
-		struct rhash_hash_info* info = ectx->vector[i].hash_info;
+		const struct rhash_hash_info* info = ectx->vector[i].hash_info;
 		assert(info->final != 0);
 		assert(info->info->digest_size < sizeof(buffer));
 		info->final(ectx->vector[i].context, out);
@@ -315,7 +327,7 @@ RHASH_API size_t rhash_export(rhash ctx, void* out, size_t size)
 	}
 	for (i = 0; i < ectx->hash_vector_size; i++) {
 		void* src_context = ectx->vector[i].context;
-		struct rhash_hash_info* hash_info = ectx->vector[i].hash_info;
+		const struct rhash_hash_info* hash_info = ectx->vector[i].hash_info;
 		unsigned is_special = (hash_info->info->flags & F_SPCEXP);
 		size_t item_size;
 		if (out != NULL) {
@@ -381,7 +393,7 @@ RHASH_API rhash rhash_import(const void* in, size_t size)
 	ectx->rc.msg_size = header->msg_size;
 	for (i = 0; i < ectx->hash_vector_size; i++) {
 		void* dst_context = ectx->vector[i].context;
-		struct rhash_hash_info* hash_info = ectx->vector[i].hash_info;
+		const struct rhash_hash_info* hash_info = ectx->vector[i].hash_info;
 		unsigned is_special = (hash_info->info->flags & F_SPCEXP);
 		size_t item_size;
 
@@ -394,7 +406,7 @@ RHASH_API rhash rhash_import(const void* in, size_t size)
 			item_size = rhash_import_alg(hash_ids[i], dst_context, src_item, left_size);
 			imported_size += item_size;
 			if (!item_size || size < imported_size) {
-				ectx->hash_vector_size = i + 1; /* clean only initialized contextes */
+				ectx->hash_vector_size = (unsigned)i + 1; /* clean only initialized contextes */
 				rhash_free(&ectx->rc);
 				return import_error_einval();
 			}
@@ -403,7 +415,7 @@ RHASH_API rhash rhash_import(const void* in, size_t size)
 			item_size = hash_info->context_size;
 			imported_size += item_size;
 			if (size < imported_size) {
-				ectx->hash_vector_size = i + 1;
+				ectx->hash_vector_size = (unsigned)i + 1;
 				rhash_free(&ectx->rc);
 				return import_error_einval();
 			}
@@ -417,10 +429,30 @@ RHASH_API rhash rhash_import(const void* in, size_t size)
 }
 
 /**
+ * Validate and convert hash_id to EXTENDED_HASH_ID.
+ *
+ * @param hash_id id of one hash algorithm
+ * @return hash_id in its extended form if it is valid, 0 otherwise
+ */
+static unsigned convert_to_extended_hash_id(unsigned hash_id)
+{
+	if (IS_EXTENDED_HASH_ID(hash_id))
+	{
+		if (IS_VALID_EXTENDED_HASH_ID(hash_id))
+			return hash_id;
+	}
+	else if (IS_VALID_HASH_MASK(hash_id) && HAS_ZERO_OR_ONE_BIT(hash_id))
+	{
+		return RHASH_EXTENDED_BIT ^ (rhash_ctz(hash_id));
+	}
+	return 0; /* invalid hash_id detected */
+}
+
+/**
  * Find rhash_vector_item by the given hash_id in rhash context.
  * The context must include the hash algorithm corresponding to the hash_id.
  *
- * @param ectx rhash context
+ * @param ectx extended rhash context
  * @param hash_id id of hash algorithm, or zero for the first hash algorithm in the rhash context
  * @return item of the rhash context if the hash algorithm has been found, NULL otherwise
  */
@@ -433,9 +465,11 @@ static rhash_vector_item* rhash_get_info(rhash_context_ext* ectx, unsigned hash_
 		return &ectx->vector[0]; /* get the first hash */
 	} else {
 		unsigned i;
-		rhash_vector_item* item;
+		hash_id = convert_to_extended_hash_id(hash_id);
+		if (!hash_id)
+			return NULL;
 		for (i = 0; i < ectx->hash_vector_size; i++) {
-			item = &ectx->vector[i];
+			rhash_vector_item* item = &ectx->vector[i];
 			assert(item->hash_info != NULL);
 			assert(item->hash_info->info != NULL);
 			if (item->hash_info->info->hash_id == hash_id)
@@ -453,7 +487,7 @@ static rhash_vector_item* rhash_get_info(rhash_context_ext* ectx, unsigned hash_
  */
 static void rhash_put_digest(rhash_vector_item* item, unsigned char* result)
 {
-	struct rhash_hash_info* info = item->hash_info;
+	const struct rhash_hash_info* info = item->hash_info;
 	unsigned char* digest = ((unsigned char*)item->context + info->digest_diff);
 
 	if (info->info->flags & F_SWAP32) {
@@ -478,7 +512,6 @@ RHASH_API void rhash_set_callback(rhash ctx, rhash_callback_t callback, void* ca
 RHASH_API int rhash_msg(unsigned hash_id, const void* message, size_t length, unsigned char* result)
 {
 	rhash ctx;
-	hash_id &= RHASH_ALL_HASHES;
 	ctx = rhash_init(hash_id);
 	if (ctx == NULL) return -1;
 	rhash_update(ctx, message, length);
@@ -487,41 +520,127 @@ RHASH_API int rhash_msg(unsigned hash_id, const void* message, size_t length, un
 	return 0;
 }
 
-RHASH_API int rhash_file_update(rhash ctx, FILE* fd)
+/**
+ * Universal file I/O context for buffered file reading.
+ */
+struct file_update_context {
+	union {
+		FILE* file_fd; /* Standard C file stream pointer (for fopen/fread) */
+		int int_fd;    /* POSIX file descriptor (for open/read) */
+	};
+	unsigned char* buffer; /* Data buffer for read operations */
+	size_t buffer_size;    /* Size of the data buffer */
+};
+
+#if defined(_WIN32)
+/* For Windows define ssize_t, which is Posix, but not in standard C */
+# define ssize_t intptr_t
+# define READ_SIZE_TYPE unsigned
+#else
+# define READ_SIZE_TYPE size_t
+#endif
+
+/**
+ * Read data from a C file stream into the context buffer using fread().
+ *
+ * @param fctx file context containing a file descriptor and buffer
+ * @param data_size number of bytes to read
+ * @return number of bytes read on success, -1 on fail with error code stored in errno
+ */
+static ssize_t read_file_fd_impl(struct file_update_context *fctx, size_t data_size)
 {
-	rhash_context_ext* const ectx = (rhash_context_ext*)ctx;
-	const size_t block_size = 8192;
-	unsigned char* buffer;
-	size_t length = 0;
-	int res = 0;
-	if (ectx->state != STATE_ACTIVE)
-		return 0; /* do nothing if canceled */
-	if (ctx == NULL) {
+	size_t read_size;
+	if (feof(fctx->file_fd))
+		return 0;
+	assert(data_size <= fctx->buffer_size);
+	read_size = fread(fctx->buffer, 1, data_size, fctx->file_fd);
+	return (ferror(fctx->file_fd) ? -1 : (ssize_t)read_size);
+}
+
+/**
+ * Read data from a POSIX file descriptor into the context buffer using read().
+ *
+ * @param fctx file context containing a file descriptor and buffer
+ * @param data_size number of bytes to read
+ * @return number of bytes read on success, -1 on fail with error code stored in errno
+ */
+static ssize_t read_int_fd_impl(struct file_update_context *fctx, size_t data_size)
+{
+	assert(data_size <= fctx->buffer_size);
+	return read(fctx->int_fd, fctx->buffer, (READ_SIZE_TYPE)data_size);
+}
+
+/**
+ * File read operation callback signature.
+ *
+ * @param fctx file context with configured buffer and file handle
+ * @param data_size requested read size
+ * @return bytes read (0 = EOF), or -1 on error (must set errno)
+ */
+typedef ssize_t (*read_file_func)(struct file_update_context *fctx, size_t data_size);
+
+/**
+ * Internal implementation for hashing file/stream data.
+ * Used by rhash_update_fd() and rhash_file_update().
+ *
+ * @param ectx extended rhash context (must be initialized)
+ * @param fctx configured file context (buffer must be pre-allocated)
+ * @param read_func callback for reading data
+ * @param data_size maximum bytes to hash (RHASH_MAX_FILE_SIZE for entire file)
+ * @return 0 on success, -1 on fail with error code stored in errno
+ */
+static int rhash_file_update_impl(
+	struct rhash_context_ext* const ectx,
+	struct file_update_context* const fctx,
+	read_file_func read_func,
+	unsigned long long data_size)
+{
+	const size_t buffer_size = 256 * 1024;
+	size_t read_size = buffer_size;
+	ssize_t length = 0;
+	if (ectx == NULL) {
 		errno = EINVAL;
 		return -1;
 	}
-	buffer = (unsigned char*)rhash_aligned_alloc(DEFAULT_ALIGNMENT, block_size);
-	if (!buffer)
+	if (ectx->state != STATE_ACTIVE)
+		return 0; /* do nothing if canceled */
+	fctx->buffer_size = buffer_size;
+	fctx->buffer = (unsigned char*)rhash_aligned_alloc(DEFAULT_ALIGNMENT, buffer_size);
+	if (!fctx->buffer) {
 		return -1; /* errno is set to ENOMEM according to UNIX 98 */
-
-	while (!feof(fd)) {
-		if (ectx->state != STATE_ACTIVE)
-			break; /* stop if canceled */
-		length = fread(buffer, 1, block_size, fd);
-
-		if (ferror(fd)) {
-			res = -1; /* note: errno contains error code */
+	}
+	while (data_size > (size_t)length) {
+		data_size -= (size_t)length;
+		if (data_size < read_size)
+			read_size = (size_t)data_size;
+		length = read_func(fctx, read_size);
+		if (length <= 0 || ectx->state != STATE_ACTIVE)
 			break;
-		} else if (length) {
-			rhash_update(ctx, buffer, length);
-
-			if (ectx->callback) {
-				((rhash_callback_t)ectx->callback)(ectx->callback_data, ectx->rc.msg_size);
-			}
+		rhash_update(&ectx->rc, fctx->buffer, (size_t)length);
+		if (ectx->callback) {
+			((rhash_callback_t)ectx->callback)(ectx->callback_data, ectx->rc.msg_size);
 		}
 	}
-	rhash_aligned_free(buffer);
-	return res;
+	rhash_aligned_free(fctx->buffer);
+	return (length < 0 ? -1 : 0);
+}
+
+RHASH_API int rhash_update_fd(rhash ctx, int fd, unsigned long long data_size)
+{
+	struct file_update_context fctx;
+	memset(&fctx, 0, sizeof(fctx));
+	fctx.int_fd = fd;
+	return rhash_file_update_impl((rhash_context_ext*)ctx,
+		&fctx, read_int_fd_impl, data_size);
+}
+
+RHASH_API int rhash_file_update(rhash ctx, FILE* fd)
+{
+	struct file_update_context fctx;
+	memset(&fctx, 0, sizeof(fctx));
+	fctx.file_fd = fd;
+	return rhash_file_update_impl((rhash_context_ext*)ctx,
+		&fctx, read_file_fd_impl, RHASH_MAX_FILE_SIZE);
 }
 
 #ifdef _WIN32
@@ -536,19 +655,13 @@ RHASH_API int rhash_file(unsigned hash_id, const char* filepath, unsigned char* 
 	rhash ctx;
 	int res;
 
-	hash_id &= RHASH_ALL_HASHES;
-	if (hash_id == 0) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	fd = fopen(filepath, FOPEN_MODE);
-	if (!fd)
-		return -1;
-
 	ctx = rhash_init(hash_id);
 	if (!ctx) {
-		fclose(fd);
+		return -1;
+	}
+	fd = fopen(filepath, FOPEN_MODE);
+	if (!fd) {
+		rhash_free(ctx);
 		return -1;
 	}
 	res = rhash_file_update(ctx, fd); /* hash the file */
@@ -568,19 +681,13 @@ RHASH_API int rhash_wfile(unsigned hash_id, const wchar_t* filepath, unsigned ch
 	rhash ctx;
 	int res;
 
-	hash_id &= RHASH_ALL_HASHES;
-	if (hash_id == 0) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	fd = _wfsopen(filepath, L"rbS", _SH_DENYWR);
-	if (!fd)
-		return -1;
-
 	ctx = rhash_init(hash_id);
 	if (!ctx) {
-		fclose(fd);
+		return -1;
+	}
+	fd = _wfsopen(filepath, L"rbS", _SH_DENYWR);
+	if (!fd) {
+		rhash_free(ctx);
 		return -1;
 	}
 	res = rhash_file_update(ctx, fd); /* hash the file */
@@ -600,11 +707,22 @@ RHASH_API int rhash_is_base32(unsigned hash_id)
 	return ((hash_id & (RHASH_TTH | RHASH_AICH)) != 0);
 }
 
+/**
+ * Returns information about a hash function by its hash_id.
+ *
+ * @param hash_id the id of hash algorithm
+ * @return pointer to the rhash_info structure containing the information
+ */
+static const rhash_info* rhash_info_by_id(unsigned hash_id)
+{
+	const rhash_hash_info* hash_info = rhash_hash_info_by_id(hash_id);
+	return (hash_info ? hash_info->info : NULL);
+}
+
 RHASH_API int rhash_get_digest_size(unsigned hash_id)
 {
-	hash_id &= RHASH_ALL_HASHES;
-	if (hash_id == 0 || (hash_id & (hash_id - 1)) != 0) return -1;
-	return (int)rhash_info_table[rhash_ctz(hash_id)].info->digest_size;
+	const rhash_info* info = rhash_info_by_id(hash_id);
+	return (info ? (int)info->digest_size : -1);
 }
 
 RHASH_API int rhash_get_hash_length(unsigned hash_id)
@@ -617,20 +735,19 @@ RHASH_API int rhash_get_hash_length(unsigned hash_id)
 RHASH_API const char* rhash_get_name(unsigned hash_id)
 {
 	const rhash_info* info = rhash_info_by_id(hash_id);
-	return (info ? info->name : 0);
+	return (info ? info->name : NULL);
 }
 
 RHASH_API const char* rhash_get_magnet_name(unsigned hash_id)
 {
 	const rhash_info* info = rhash_info_by_id(hash_id);
-	return (info ? info->magnet_name : 0);
+	return (info ? info->magnet_name : NULL);
 }
 
 static size_t rhash_get_magnet_url_size(const char* filepath,
-	rhash context, unsigned hash_mask, int flags)
+	rhash_context_ext* ectx, uint64_t hash_mask, int flags)
 {
 	size_t size = 0; /* count terminating '\0' */
-	unsigned bit, hash = context->hash_id & hash_mask;
 
 	/* RHPR_NO_MAGNET, RHPR_FILESIZE */
 	if ((flags & RHPR_NO_MAGNET) == 0) {
@@ -638,7 +755,7 @@ static size_t rhash_get_magnet_url_size(const char* filepath,
 	}
 
 	if ((flags & RHPR_FILESIZE) != 0) {
-		uint64_t num = context->msg_size;
+		uint64_t num = ectx->rc.msg_size;
 
 		size += 4;
 		if (num == 0) size++;
@@ -650,29 +767,44 @@ static size_t rhash_get_magnet_url_size(const char* filepath,
 	if (filepath) {
 		size += 4 + rhash_urlencode(NULL, filepath, strlen(filepath), 0);
 	}
+	if (!hash_mask) {
+		return size;
+	}
 
 	/* loop through hash values */
-	for (bit = hash & -(int)hash; bit <= hash; bit <<= 1) {
-		const char* name;
-		if ((bit & hash) == 0) continue;
-		if ((name = rhash_get_magnet_name(bit)) == 0) continue;
-
+	for (; hash_mask; hash_mask = hash_mask & (hash_mask - 1)) {
+		uint64_t bit = hash_mask & -(int)hash_mask;
+		unsigned hash_id = EXTENDED_HASH_ID_FROM_BIT64(bit);
+		const char* name = rhash_get_magnet_name(hash_id);
+		if (!name)
+			continue;
 		size += (7 + 2) + strlen(name);
-		size += rhash_print(NULL, context, bit,
+		size += rhash_print(NULL, &ectx->rc, hash_id,
 			(bit & RHASH_SHA1 ? RHPR_BASE32 : 0));
 	}
 
 	return size;
 }
 
-RHASH_API size_t rhash_print_magnet(char* output, const char* filepath,
-	rhash context, unsigned hash_mask, int flags)
+static size_t rhash_print_magnet_impl(char* output, size_t out_size, const char* filepath,
+	rhash_context_ext* const ectx, int flags, uint64_t hash_mask)
 {
 	int i;
 	const char* begin = output;
 
-	if (output == NULL)
-		return rhash_get_magnet_url_size(filepath, context, hash_mask, flags);
+	hash_mask &= ectx->rc.hash_mask;
+
+	if (output == NULL) {
+		return rhash_get_magnet_url_size(filepath, ectx, hash_mask, flags);
+	}
+	if (out_size != RHASH_ERROR) {
+		size_t prefix_size = rhash_get_magnet_url_size(filepath, ectx, 0, flags);
+		if (out_size < prefix_size) {
+			errno = ENOMEM;
+			return 0;
+		}
+		out_size -= prefix_size;
+	}
 
 	/* RHPR_NO_MAGNET, RHPR_FILESIZE */
 	if ((flags & RHPR_NO_MAGNET) == 0) {
@@ -683,7 +815,7 @@ RHASH_API size_t rhash_print_magnet(char* output, const char* filepath,
 	if ((flags & RHPR_FILESIZE) != 0) {
 		strcpy(output, "xl=");
 		output += 3;
-		output += rhash_sprintI64(output, context->msg_size);
+		output += rhash_sprintI64(output, ectx->rc.msg_size);
 		*(output++) = '&';
 	}
 
@@ -695,32 +827,82 @@ RHASH_API size_t rhash_print_magnet(char* output, const char* filepath,
 		*(output++) = '&';
 	}
 
-	for (i = 0; i < 2; i++) {
-		unsigned bit;
-		unsigned hash = context->hash_id & hash_mask;
-		hash = (i == 0 ? hash & (RHASH_ED2K | RHASH_AICH)
-			: hash & ~(RHASH_ED2K | RHASH_AICH));
-		if (!hash) continue;
+	for (i = 0; i <= 1; i++) {
+		static const uint64_t print_first = (RHASH_ED2K | RHASH_AICH);
+		uint64_t hash = (!i ? hash_mask & print_first : hash_mask & ~print_first);
 
 		/* loop through hash values */
-		for (bit = hash & -(int)hash; bit <= hash; bit <<= 1) {
-			const char* name;
-			if ((bit & hash) == 0) continue;
-			if (!(name = rhash_get_magnet_name(bit))) continue;
-
+		for (; hash; hash = hash & (hash - 1)) {
+			uint64_t bit = hash & -(int)hash;
+			unsigned hash_id = EXTENDED_HASH_ID_FROM_BIT64(bit);
+			const char* magnet_name = rhash_get_magnet_name(hash_id);
+			size_t name_length;
+			if (!magnet_name)
+				continue; /* silently skip unsupported hash_id */
+			name_length = strlen(magnet_name);
+			if (out_size != RHASH_ERROR) {
+				size_t hash_part_size = (7 + 2) + name_length +
+					rhash_print(NULL, &ectx->rc, hash_id,
+						(bit & RHASH_SHA1 ? RHPR_BASE32 : 0));
+				if (out_size < hash_part_size) {
+					errno = ENOMEM;
+					return 0;
+				}
+				out_size -= hash_part_size;
+			}
 			strcpy(output, "xt=urn:");
 			output += 7;
-			strcpy(output, name);
-			output += strlen(name);
+			strcpy(output, magnet_name);
+			output += name_length;
 			*(output++) = ':';
-			output += rhash_print(output, context, bit,
+			output += rhash_print(output, &ectx->rc, hash_id,
 				(bit & RHASH_SHA1 ? flags | RHPR_BASE32 : flags));
 			*(output++) = '&';
 		}
 	}
 	output[-1] = '\0'; /* terminate the line */
-
 	return (output - begin);
+}
+
+RHASH_API size_t rhash_print_magnet_multi(char* output, size_t out_size, const char* filepath,
+	rhash context, int flags, size_t count, const unsigned hash_ids[])
+{
+	uint64_t hash_mask = 0;
+	if (!context) {
+		errno = EINVAL;
+		return 0;
+	}
+	if (count == 0 || (count == 1 && hash_ids[0] == RHASH_ALL_HASHES)) {
+		hash_mask = RHASH_LOW_HASHES_MASK;
+	} else {
+		size_t i;
+		for (i = 0; i < count; i++) {
+			unsigned hash_id = hash_ids[i];
+			if (!IS_VALID_HASH_ID(hash_id)) {
+				errno = EINVAL;
+				return 0;
+			}
+			if (IS_EXTENDED_HASH_ID(hash_id))
+				hash_mask |= I64(1) << GET_EXTENDED_HASH_ID_INDEX(hash_id);
+			else
+				hash_mask |= hash_id;
+		}
+	}
+	return rhash_print_magnet_impl(output, out_size, filepath,
+		(rhash_context_ext*)context, flags, hash_mask);
+}
+
+RHASH_API size_t rhash_print_magnet(char* output, const char* filepath,
+	rhash context, unsigned hash_mask, int flags)
+{
+	if (hash_mask == RHASH_ALL_HASHES)
+		hash_mask = RHASH_LOW_HASHES_MASK;
+	if (!context || IS_EXTENDED_HASH_ID(hash_mask) || !hash_mask) {
+		errno = EINVAL;
+		return 0;
+	}
+	return rhash_print_magnet_impl(output, RHASH_ERROR, filepath,
+		(rhash_context_ext*)context, flags, (uint64_t)hash_mask);
 }
 
 
@@ -813,7 +995,8 @@ RHASH_API size_t rhash_print(char* output, rhash context, unsigned hash_id, int 
 }
 
 #if (defined(_WIN32) || defined(__CYGWIN__)) && defined(RHASH_EXPORTS)
-#include <windows.h>
+# define WIN32_LEAN_AND_MEAN
+# include <windows.h>
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved);
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
 {
@@ -836,25 +1019,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
 /* Helper macro */
 #define ENSURE_THAT(condition) while(!(condition)) { return RHASH_ERROR; }
 
-static rhash_uptr_t rhash_get_algorithms_impl(const rhash_context_ext* ctx, size_t count, void* ptr)
+static rhash_uptr_t rhash_get_algorithms_impl(const rhash_context_ext* ctx, size_t count, unsigned* data)
 {
-	unsigned* buffer = (unsigned*)(ptr);
 	size_t i;
-	if (ctx != 0) {
-		if (count != 0 && buffer != 0) {
-			ENSURE_THAT(ctx->hash_vector_size <= count);
-			for (i = 0; i < ctx->hash_vector_size; i++)
-				buffer[i] = ctx->vector[i].hash_info->info->hash_id;
-		}
-		return ctx->hash_vector_size;
-	} else {
-		if (count != 0 && buffer != 0) {
-			ENSURE_THAT((size_t)RHASH_HASH_COUNT <= count);
-			for (i = 0; i < (size_t)RHASH_HASH_COUNT; i++)
-				buffer[i] = 1 << i;
-		}
-		return (rhash_uptr_t)RHASH_HASH_COUNT;
+	if (count != 0 && data != 0) {
+		ENSURE_THAT(ctx->hash_vector_size <= count);
+		for (i = 0; i < ctx->hash_vector_size; i++)
+			data[i] = ctx->vector[i].hash_info->info->hash_id;
 	}
+	return ctx->hash_vector_size;
 }
 
 static size_t hash_bitmask_to_array(unsigned bitmask, size_t count, unsigned* data)
@@ -879,8 +1052,14 @@ static unsigned ids_array_to_hash_bitmask(size_t count, unsigned* data)
 {
 	unsigned bitmask = 0;
 	size_t i;
-	for (i = 0; i < count; i++)
-		bitmask |= data[i];
+	for (i = 0; i < count; i++) {
+		if (!IS_EXTENDED_HASH_ID(data[i]))
+			bitmask |= data[i];
+		else if (data[i] == RHASH_ALL_HASHES)
+			bitmask |= RHASH_LOW_HASHES_MASK;
+		else
+			bitmask |= 1 << GET_EXTENDED_HASH_ID_INDEX(data[i]);
+	}
 	return bitmask;
 }
 #endif
@@ -893,10 +1072,12 @@ RHASH_API size_t rhash_ctrl(rhash context, int cmd, size_t size, void* data)
 	case RMSG_GET_CONTEXT:
 		{
 			unsigned i;
+			unsigned hash_id = convert_to_extended_hash_id((unsigned)size);
+			ENSURE_THAT(hash_id);
 			ENSURE_THAT(data);
 			for (i = 0; i < ctx->hash_vector_size; i++) {
-				struct rhash_hash_info* info = ctx->vector[i].hash_info;
-				if (info->info->hash_id == (unsigned)size) {
+				const struct rhash_hash_info* info = ctx->vector[i].hash_info;
+				if (info->info->hash_id == hash_id) {
 					*(void**)data = ctx->vector[i].context;
 					return 0;
 				}
@@ -917,8 +1098,16 @@ RHASH_API size_t rhash_ctrl(rhash context, int cmd, size_t size, void* data)
 			ctx->flags |= RCTX_AUTO_FINAL;
 		break;
 
+	case RMSG_HAS_CPU_FEATURE:
+		return (size_t)has_cpu_feature((unsigned)size);
 	case RMSG_GET_ALL_ALGORITHMS:
-		return rhash_get_algorithms_impl(NULL, size, (unsigned*)data);
+		if (data && size) {
+			const unsigned* hash_ids;
+			ENSURE_THAT(size >= RHASH_HASH_COUNT);
+			hash_ids = rhash_get_all_hash_ids(RHASH_ALL_HASHES, &size);
+			memcpy(data, hash_ids, size * sizeof(*hash_ids));
+		}
+		return RHASH_HASH_COUNT;
 	case RMSG_GET_CTX_ALGORITHMS:
 		ENSURE_THAT(ctx);
 		return rhash_get_algorithms_impl(ctx, size, (unsigned*)data);

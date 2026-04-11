@@ -22,6 +22,8 @@ import rhash
 class TestRHash(unittest.TestCase):
     """The test-case class for the rhash module."""
 
+    maxDiff = 1024
+
     def test_all_hashes(self):
         """Verify all hash functions."""
         ctx = rhash.RHash(rhash.ALL)
@@ -31,9 +33,7 @@ class TestRHash(unittest.TestCase):
         self.assertEqual("c1d04330", ctx.hash(rhash.CRC32C))
         self.assertEqual("bde52cb31de33e46245e05fbdbd6fb24", ctx.hash(rhash.MD4))
         self.assertEqual("0cc175b9c0f1b6a831c399e269772661", ctx.hash(rhash.MD5))
-        self.assertEqual(
-            "86f7e437faa5a7fce15d1ddcb9eaeaea377667b8", ctx.hash(rhash.SHA1)
-        )
+        self.assertEqual("86f7e437faa5a7fce15d1ddcb9eaeaea377667b8", ctx.hash(rhash.SHA1))
         self.assertEqual(
             "77befbef2e7ef8ab2ec8f93bf587a7fc613e247f5f247809", ctx.hash(rhash.TIGER)
         )
@@ -69,9 +69,7 @@ class TestRHash(unittest.TestCase):
         self.assertEqual(
             "4872bcbc4cd0f0a9dc7c2f7045e5b43b6c830db8", ctx.hash(rhash.HAS160)
         )
-        self.assertEqual(
-            "bf5ce540ae51bc50399f96746c5a15bd", ctx.hash(rhash.SNEFRU128)
-        )
+        self.assertEqual("bf5ce540ae51bc50399f96746c5a15bd", ctx.hash(rhash.SNEFRU128))
         self.assertEqual(
             "45161589ac317be0ceba70db2573ddda6e668a31984b39bf65e4b664b584c63d",
             ctx.hash(rhash.SNEFRU256),
@@ -129,6 +127,10 @@ class TestRHash(unittest.TestCase):
             "333fcb4ee1aa7c115355ec66ceac917c8bfd815bf7587d325aec1864edd24e34"
             "d5abe2c6b1b5ee3face62fed78dbef802f2a85cb91d455a8f5249d330853cb3c",
             ctx.hash(rhash.BLAKE2B),
+        )
+        self.assertEqual(
+            "17762fddd969a453925d65717ac3eea21320b66b54342fde15128d6caf21215f",
+            ctx.hash(rhash.BLAKE3),
         )
         # Test reset
         ctx.reset().finish()
@@ -199,29 +201,36 @@ class TestRHash(unittest.TestCase):
         )
         os.remove(path)
 
+    def test_librhash_version(self):
+        """Test get_librhash_version() function."""
+        version = rhash.get_librhash_version()
+        self.assertTrue(isinstance(version, str))
+        self.assertRegex(version, r"^[1-9]\d*\.\d+\.\d+$")
+        ver = rhash.get_librhash_version_int()
+        major, minor, patch = (ver >> 24, (ver >> 16) & 255, (ver >> 8) & 255)
+        self.assertTrue(1 <= major <= 9)
+        self.assertTrue(0 <= minor <= 9)
+        self.assertTrue(0 <= patch <= 9)
+
     def test_the_with_operator(self):
         """Test the with operator."""
         with rhash.RHash(rhash.CRC32, rhash.MD5) as ctx:
             ctx.update("a").finish()
             self.assertEqual("e8b7be43", ctx.hash(rhash.CRC32))
             self.assertEqual("btaxlooa6g3kqmodthrgs5zgme", ctx.base32(rhash.MD5))
+            if rhash.get_librhash_version_int() > 0x01040400:
+                with self.assertRaises(rhash.InvalidArgumentError):
+                    ctx.base32(rhash.SHA1)
+                with self.assertRaises(rhash.InvalidArgumentError):
+                    ctx.base64(rhash.SHA1)
+                with self.assertRaises(rhash.InvalidArgumentError):
+                    ctx.hex(rhash.SHA1)
+                with self.assertRaises(rhash.InvalidArgumentError):
+                    ctx.raw(rhash.SHA1)
+        if rhash.get_librhash_version_int() > 0x01040400:
             with self.assertRaises(rhash.InvalidArgumentError):
-                ctx.base32(rhash.SHA1)
-            with self.assertRaises(rhash.InvalidArgumentError):
-                ctx.base64(rhash.SHA1)
-            with self.assertRaises(rhash.InvalidArgumentError):
-                ctx.hex(rhash.SHA1)
-            with self.assertRaises(rhash.InvalidArgumentError):
-                ctx.raw(rhash.SHA1)
-        with self.assertRaises(rhash.InvalidArgumentError):
-            with rhash.RHash(rhash.CRC32, rhash.MD5) as ctx:
-                ctx.hash(rhash.SHA1)
-
-    def test_librhash_version(self):
-        """Test get_librhash_version() function."""
-        version = rhash.get_librhash_version()
-        self.assertTrue(isinstance(version, str))
-        self.assertRegex(version, r"^[1-9]\d*\.\d+\.\d+$")
+                with rhash.RHash(rhash.CRC32, rhash.MD5) as ctx:
+                    ctx.hash(rhash.SHA1)
 
     def test_store_and_load(self):
         """Test store/load methods."""

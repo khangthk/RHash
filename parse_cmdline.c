@@ -81,6 +81,8 @@ static void print_help(void)
 	print_help_line("  -H, --sha1       ", digest_format, "SHA1");
 	print_help_line("      --sha224, --sha256, --sha384, --sha512 ", digest_format, "SHA2");
 	print_help_line("      --sha3-224, --sha3-256, --sha3-384, --sha3-512 ", digest_format, "SHA3");
+	print_help_line("      --blake2s,  --blake2b  ", digest_format, "BLAKE2S/BLAKE2B");
+	print_help_line("      --blake3     ", digest_format, "BLAKE3");
 	print_help_line("  -T, --tth        ", digest_format, "TTH");
 	print_help_line("      --btih       ", digest_format, "BitTorrent InfoHash");
 	print_help_line("  -A, --aich       ", digest_format, "AICH");
@@ -95,14 +97,13 @@ static void print_help(void)
 	print_help_line("      --gost94-cryptopro ", digest_format, _("GOST R 34.11-94 CryptoPro"));
 	print_help_line("      --ripemd160  ", digest_format, "RIPEMD-160");
 	print_help_line("      --has160     ", digest_format, "HAS-160");
-	print_help_line("      --blake2s,   --blake2b   ", digest_format, "BLAKE2S/BLAKE2B");
 	print_help_line("      --edonr256,  --edonr512  ", digest_format, "EDON-R 256/512");
 	print_help_line("      --snefru128, --snefru256 ", digest_format, "SNEFRU-128/256");
 	print_help_line("  -a, --all        ", _("Calculate all supported hash functions.\n"));
 	print_help_line("  -c, --check      ", _("Check hash files specified by command line.\n"));
-	print_help_line("  -u, --update=<file> ", _("Update the specified hash file.\n"));
-	print_help_line("      --missing=<file> ", _("Read the hash file and print missing and inaccessible files.\n"));
-	print_help_line("      --unverified=<file> ", _("Print files that can't be verified by the hash file.\n"));
+	print_help_line("  -u, --update=<hashfile> ", _("Update the specified hash file.\n"));
+	print_help_line("      --missing=<hashfile> ", _("List files from hash file that are missing or inaccessible.\n"));
+	print_help_line("      --unverified=<hashfile> ", _("List command-line files missing from given hash file.\n"));
 	print_help_line("  -e, --embed-crc  ", _("Rename files by inserting crc32 sum into name.\n"));
 	print_help_line("  -k, --check-embedded  ", _("Verify files by crc32 sum embedded in their names.\n"));
 	print_help_line("      --list-hashes  ", _("List the names of supported hash functions, one per line.\n"));
@@ -125,6 +126,7 @@ static void print_help(void)
 	print_help_line("      --sfv        ", _("Print message digests, using SFV format (default).\n"));
 	print_help_line("      --bsd        ", _("Print message digests, using BSD-like format.\n"));
 	print_help_line("      --simple     ", _("Print message digests, using simple format.\n"));
+	print_help_line("      --one-hash   ", _("Print one message digest per line without file information.\n"));
 	print_help_line("      --hex        ", _("Print message digests in hexadecimal format.\n"));
 	print_help_line("      --base32     ", _("Print message digests in Base32 format.\n"));
 	print_help_line("  -b, --base64     ", _("Print message digests in Base64 format.\n"));
@@ -168,7 +170,10 @@ static void list_hashes(void)
  */
 static void add_hash_id(options_t* o, unsigned hash_id)
 {
-	o->hash_mask |= hash_id_to_bit64(hash_id);
+	if (hash_id == RHASH_ALL_HASHES)
+		o->hash_mask = get_all_supported_hash_mask();
+	else
+		o->hash_mask |= hash_id_to_bit64(hash_id);
 }
 
 /**
@@ -385,11 +390,9 @@ enum option_type_t
 	F_OUTPUT_OPT = 32, /* flag: option changes program output */
 	F_UFLG = 1, /* set a bit flag in a uint32_t field */
 	F_UENC = F_UFLG | F_OUTPUT_OPT, /* an encoding changing option */
-	F_CSTR = 2 | F_NEED_PARAM, /* store parameter as a C string */
 	F_TSTR = 3 | F_NEED_PARAM, /* store parameter as a tstr_t */
 	F_TOUT = 4 | F_NEED_PARAM | F_OUTPUT_OPT,
 	F_VFNC = 5, /* just call a function */
-	F_PFNC = 6 | F_NEED_PARAM, /* process option parameter by calling a handler */
 	F_TFNC = 7 | F_NEED_PARAM, /* process option parameter by calling a handler */
 	F_UFNC = 8 | F_NEED_PARAM, /* pass UTF-8 encoded parameter to the handler */
 	F_PRNT = 9, /* print a constant C-string and exit */
@@ -450,6 +453,7 @@ cmdline_opt_t cmdline_opt[] =
 	{ F_VFNC,   0,   0, "edonr512",  (opt_handler_t)add_hash_id, 0, RHASH_EDONR512 },
 	{ F_VFNC,   0,   0, "blake2s",   (opt_handler_t)add_hash_id, 0, RHASH_BLAKE2S },
 	{ F_VFNC,   0,   0, "blake2b",   (opt_handler_t)add_hash_id, 0, RHASH_BLAKE2B },
+	{ F_VFNC,   0,   0, "blake3",    (opt_handler_t)add_hash_id, 0, RHASH_BLAKE3 },
 
 	/* output formats */
 	{ F_UFLG,   0,   0, "sfv",       0, &opt.fmt, FMT_SFV },
@@ -461,7 +465,7 @@ cmdline_opt_t cmdline_opt[] =
 	{ F_UFLG,   0,   0, "uppercase", 0, &opt.flags, OPT_UPPERCASE },
 	{ F_UFLG,   0,   0, "lowercase", 0, &opt.flags, OPT_LOWERCASE },
 	{ F_TSTR,   0,   0, "template",  0, &opt.template_file, 0 },
-	{ F_CSTR, 'p',   0, "printf",    0, &opt.printf_str, 0 },
+	{ F_TSTR, 'p',   0, "printf",    0, &opt.printf_str, 0 },
 
 	/* other options */
 	{ F_UFLG, 'r', 'R', "recursive",     0, &opt.flags, OPT_RECURSIVE },
@@ -476,19 +480,19 @@ cmdline_opt_t cmdline_opt[] =
 	{ F_UENC, 'P',   0, "percents",      0, &opt.flags, OPT_PERCENTS },
 	{ F_UFLG,   0,   0, "speed",         0, &opt.flags, OPT_SPEED },
 	{ F_UFLG, 'e',   0, "embed-crc",     0, &opt.flags, OPT_EMBED_CRC },
-	{ F_CSTR,   0,   0, "embed-crc-delimiter", 0, &opt.embed_crc_delimiter, 0 },
-	{ F_PFNC,   0,   0, "path-separator", (opt_handler_t)set_path_separator, 0, 0 },
+	{ F_TSTR,   0,   0, "embed-crc-delimiter", 0, &opt.embed_crc_delimiter, 0 },
+	{ F_UFNC,   0,   0, "path-separator", (opt_handler_t)set_path_separator, 0, 0 },
 	{ F_TOUT, 'o',   0, "output",        0, &opt.output, 0 },
 	{ F_TOUT, 'l',   0, "log",           0, &opt.log,    0 },
-	{ F_PFNC, 'q',   0, "accept",        (opt_handler_t)add_file_suffix, 0, MASK_ACCEPT },
-	{ F_PFNC, 't',   0, "crc-accept",    (opt_handler_t)add_file_suffix, 0, MASK_CRC_ACCEPT },
-	{ F_PFNC,   0,   0, "exclude",       (opt_handler_t)add_file_suffix, 0, MASK_EXCLUDE },
+	{ F_UFNC, 'q',   0, "accept",        (opt_handler_t)add_file_suffix, 0, MASK_ACCEPT },
+	{ F_UFNC, 't',   0, "crc-accept",    (opt_handler_t)add_file_suffix, 0, MASK_CRC_ACCEPT },
+	{ F_UFNC,   0,   0, "exclude",       (opt_handler_t)add_file_suffix, 0, MASK_EXCLUDE },
 	{ F_VFNC,   0,   0, "video",         (opt_handler_t)accept_video, 0, 0 },
 	{ F_VFNC,   0,   0, "nya",           (opt_handler_t)nya, 0, 0 },
-	{ F_PFNC,   0,   0, "max-depth",      (opt_handler_t)set_max_depth, 0, 0 },
+	{ F_UFNC,   0,   0, "max-depth",      (opt_handler_t)set_max_depth, 0, 0 },
 	{ F_UFLG,   0,   0, "bt-private",    0, &opt.flags, OPT_BT_PRIVATE },
 	{ F_UFLG,   0,   0, "bt-transmission", 0, &opt.flags, OPT_BT_TRANSMISSION },
-	{ F_PFNC,   0,   0, "bt-piece-length", (opt_handler_t)set_bt_piece_length, 0, 0 },
+	{ F_UFNC,   0,   0, "bt-piece-length", (opt_handler_t)set_bt_piece_length, 0, 0 },
 	{ F_UFNC,   0,   0, "bt-announce",   (opt_handler_t)bt_announce, 0, 0 },
 	{ F_TSTR,   0,   0, "bt-batch",      0, &opt.bt_batch_file, 0 },
 	{ F_UFLG,   0,   0, "benchmark-raw", 0, &opt.flags, OPT_BENCH_RAW },
@@ -497,10 +501,10 @@ cmdline_opt_t cmdline_opt[] =
 	{ F_UFLG,   0,   0, "hex",           0, &opt.flags, OPT_HEX },
 	{ F_UFLG,   0,   0, "base32",        0, &opt.flags, OPT_BASE32 },
 	{ F_UFLG, 'b',   0, "base64",        0, &opt.flags, OPT_BASE64 },
-	{ F_PFNC,   0,   0, "openssl",       (opt_handler_t)openssl_flags, 0, 0 },
+	{ F_UFNC,   0,   0, "openssl",       (opt_handler_t)openssl_flags, 0, 0 },
 
 	/* for compatibility */
-	{ F_PFNC,   0,   0, "maxdepth",      (opt_handler_t)set_max_depth, 0, 0 },
+	{ F_UFNC,   0,   0, "maxdepth",      (opt_handler_t)set_max_depth, 0, 0 },
 
 #ifdef _WIN32 /* code pages (windows only) */
 	{ F_UENC,   0,   0, "utf8", 0, &opt.flags, OPT_UTF8 },
@@ -547,25 +551,35 @@ static void apply_option(options_t* opts, parsed_option_t* option)
 
 	/* check if option requires a parameter */
 	if (is_param_required(option_type)) {
-		if (!option->parameter) {
+#ifdef _WIN32
+		int from_config = (opts == &conf_opt);
+#endif
+		rsh_tchar* tparam = (rsh_tchar*)option->parameter;
+		if (!tparam) {
 			die(_("argument is required for option %s\n"), option->name);
 		}
 
 #ifdef _WIN32
+		if (from_config) {
+			/* treat config lines as UTF-8 encoded and convert it to UTF-16 */
+			tparam = convert_str_to_wcs((char*)option->parameter, ConvertToUtf8);
+		}
 		if (option_type == F_TOUT || option_type == F_TFNC || option_type == F_TSTR) {
 			/* leave the value in UTF-16 */
-			value = (char*)rsh_wcsdup((wchar_t*)option->parameter);
+			value = (char*)rsh_wcsdup(tparam);
 		}
 		else if (option_type == F_UFNC) {
 			/* convert from UTF-16 to UTF-8 */
-			value = convert_wcs_to_str((wchar_t*)option->parameter, ConvertToUtf8 | ConvertExact);
+			value = convert_wcs_to_str(tparam, ConvertUtf8ToWcs | ConvertExact);
 		} else {
 			/* convert from UTF-16 */
-			value = convert_wcs_to_str((wchar_t*)option->parameter, ConvertToPrimaryEncoding);
+			value = convert_wcs_to_str(tparam, ConvertToPrimaryEncoding);
 		}
 		rsh_vector_add_ptr(opt.mem, value);
+		if (from_config)
+			free(tparam);
 #else
-		value = (char*)option->parameter;
+		value = tparam;
 #endif
 	}
 
@@ -575,13 +589,11 @@ static void apply_option(options_t* opts, parsed_option_t* option)
 	case F_UENC:
 		*(unsigned*)((char*)opts + ((char*)o->ptr - (char*)&opt)) |= o->param;
 		break;
-	case F_CSTR:
 	case F_TSTR:
 	case F_TOUT:
 		/* save the option parameter */
 		*(char**)((char*)opts + ((char*)o->ptr - (char*)&opt)) = value;
 		break;
-	case F_PFNC:
 	case F_TFNC:
 	case F_UFNC:
 		/* call option parameter handler */
@@ -735,7 +747,7 @@ static int read_config(void)
 	int res;
 
 	/* initialize conf_opt */
-	memset(&conf_opt, 0, sizeof(opt));
+	memset(&conf_opt, 0, sizeof(conf_opt));
 	conf_opt.find_max_depth = -1;
 
 	if (!find_conf_file()) return 0;
@@ -744,13 +756,18 @@ static int read_config(void)
 
 	fd = file_fopen(&rhash_data.config_file, FOpenRead);
 	if (!fd) return -1;
+	memset(&option, 0, sizeof(option));
 
 	while (fgets(buf, LINE_BUF_SIZE, fd)) {
 		size_t index;
 		cmdline_opt_t* t;
-		char* line = str_trim(buf);
+		char* line = buf;
 		char* name;
 		char* value;
+
+		if (STARTS_WITH_UTF8_BOM(line))
+			line += 3;
+		line = str_trim(line);
 
 		line_number++;
 		if (*line == 0 || IS_COMMENT(*line))
@@ -1050,6 +1067,18 @@ static void apply_cmdline_options(struct parsed_cmd_line_t* cmd_line)
 	if (!(opt.flags & OPT_RECURSIVE)) opt.find_max_depth = 0;
 	opt.search_data->max_depth = opt.find_max_depth;
 
+#ifdef _WIN32
+	/* convert from UTF-16 to UTF-8, after choosing primary codepage */
+	if (opt.printf_str) {
+		opt.printf_str = convert_wcs_to_str((rsh_tchar*)opt.printf_str, ConvertToPrimaryEncoding);
+		rsh_vector_add_ptr(opt.mem, opt.printf_str);
+	}
+	if (opt.embed_crc_delimiter) {
+		opt.embed_crc_delimiter = convert_wcs_to_str((rsh_tchar*)opt.embed_crc_delimiter, ConvertToPrimaryEncoding);
+		rsh_vector_add_ptr(opt.mem, opt.embed_crc_delimiter);
+	}
+#endif
+
 	/* set defaults */
 	if (opt.embed_crc_delimiter == 0) opt.embed_crc_delimiter = " ";
 }
@@ -1113,6 +1142,7 @@ static void set_default_hash_mask(const char* progName)
 	if (strstr(buf, "edonr512"))  add_hash_id(&opt, RHASH_EDONR512);
 	if (strstr(buf, "blake2s"))   add_hash_id(&opt, RHASH_BLAKE2S);
 	if (strstr(buf, "blake2b"))   add_hash_id(&opt, RHASH_BLAKE2B);
+	if (strstr(buf, "blake3"))    add_hash_id(&opt, RHASH_BLAKE3);
 	if (strstr(buf, "snefru256")) add_hash_id(&opt, RHASH_SNEFRU128);
 	if (strstr(buf, "snefru128")) add_hash_id(&opt, RHASH_SNEFRU256);
 	else if (strstr(buf, "ed2k")) add_hash_id(&opt, RHASH_ED2K);

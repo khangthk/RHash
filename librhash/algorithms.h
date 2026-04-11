@@ -30,7 +30,7 @@ typedef struct rhash_info
 	 */
 	unsigned hash_id;
 	/**
-	 * Flags bit-mask, including RHASH_INFO_BASE32 bit.
+	 * Flags bitmask, including RHASH_INFO_BASE32 bit.
 	 */
 	unsigned flags;
 	/**
@@ -71,7 +71,7 @@ typedef struct rhash_hash_info
  */
 typedef struct rhash_vector_item
 {
-	struct rhash_hash_info* hash_info;
+	const struct rhash_hash_info* hash_info;
 	void* context;
 } rhash_vector_item;
 
@@ -93,7 +93,6 @@ typedef struct rhash_context_ext
 extern rhash_hash_info rhash_hash_info_default[RHASH_HASH_COUNT];
 extern rhash_hash_info* rhash_info_table;
 extern int rhash_info_size;
-extern unsigned rhash_uninitialized_algorithms;
 
 extern rhash_info info_crc32;
 extern rhash_info info_crc32c;
@@ -123,6 +122,13 @@ extern rhash_info info_sha3_512;
 extern rhash_info info_edr256;
 extern rhash_info info_edr512;
 
+#define IS_EXTENDED_HASH_ID(hash_id) ((hash_id) & RHASH_EXTENDED_BIT)
+#define GET_EXTENDED_HASH_ID_INDEX(hash_id) ((unsigned)((hash_id) & ~RHASH_EXTENDED_BIT))
+#define EXTENDED_HASH_ID(index) ((unsigned)(RHASH_EXTENDED_BIT | (index)))
+#define EXTENDED_SHA1 EXTENDED_HASH_ID(3)
+#define EXTENDED_BTIH EXTENDED_HASH_ID(6)
+#define EXTENDED_WHIRLPOOL EXTENDED_HASH_ID(9)
+
 /* rhash_info flags */
 #define F_BS32 1   /* default output in base32 */
 #define F_SWAP32 2 /* big endian flag */
@@ -142,8 +148,9 @@ extern rhash_info info_edr512;
 #define F_BE64 0
 #endif
 
-void rhash_init_algorithms(unsigned mask);
-const rhash_info* rhash_info_by_id(unsigned hash_id); /* get hash sum info by hash id */
+void rhash_init_algorithms(void);
+const rhash_hash_info* rhash_hash_info_by_id(unsigned hash_id); /* get hash sum info by hash id */
+const unsigned* rhash_get_all_hash_ids(unsigned all_id, size_t* count);
 
 #if !defined(NO_IMPORT_EXPORT)
 size_t rhash_export_alg(unsigned hash_id, const void* ctx, void* out, size_t size);

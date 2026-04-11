@@ -4,6 +4,7 @@
 #include "hash_print.h"
 #include "output.h"
 #include "parse_cmdline.h"
+#include "platform.h"
 #include "rhash_main.h"
 #include "win_utils.h"
 #include "librhash/rhash.h"
@@ -77,6 +78,8 @@ int set_openssl_enabled_hash_mask(uint64_t hash_mask)
 	return (res != RHASH_ERROR ? (int)res : -1);
 }
 
+#define unknown_bit 0x8000000000000000
+
 /**
  * Return hash_mask for algorithms supported by openssl.
  ^
@@ -84,7 +87,6 @@ int set_openssl_enabled_hash_mask(uint64_t hash_mask)
  */
 uint64_t get_openssl_supported_hash_mask(void)
 {
-	const uint64_t unknown_bit = 0x8000000000000000;
 	static uint64_t supported = unknown_bit;
 	if (supported == unknown_bit) {
 		unsigned hash_ids[64];
@@ -103,7 +105,6 @@ uint64_t get_openssl_supported_hash_mask(void)
  */
 uint64_t get_all_supported_hash_mask(void)
 {
-	const uint64_t unknown_bit = 0x8000000000000000;
 	static uint64_t hash_mask = unknown_bit;
 	if (hash_mask == unknown_bit) {
 		unsigned hash_ids[64];
@@ -127,7 +128,7 @@ uint64_t get_all_supported_hash_mask(void)
  */
 static void init_btih_data(struct file_info* info)
 {
-	assert((info->rctx->hash_id & RHASH_BTIH) != 0);
+	assert((info->rctx->hash_mask & RHASH_BTIH) != 0);
 
 	if (opt.flags & (OPT_BT_PRIVATE | OPT_BT_TRANSMISSION)) {
 		unsigned options = (opt.flags & OPT_BT_PRIVATE ? RHASH_TORRENT_OPT_PRIVATE : 0)
@@ -207,15 +208,15 @@ static void re_init_rhash_context(struct file_info* info)
  */
 int calc_sums(struct file_info* info)
 {
-	FILE* fd = 0;
+	int fd = -1;
 	int res;
 
 	assert(info->file);
 	if (FILE_ISSTDIN(info->file)) {
-		fd = stdin;
+		fd = 0;
 #ifdef _WIN32
 		/* using 0 instead of _fileno(stdin). _fileno() is undefined under 'gcc -ansi' */
-		if (setmode(0, _O_BINARY) < 0)
+		if (setmode(fd, _O_BINARY) < 0)
 			return -1;
 #endif
 	} else {
@@ -230,9 +231,9 @@ int calc_sums(struct file_info* info)
 			return 0;
 
 		if (!FILE_ISDATA(info->file)) {
-			fd = file_fopen(info->file, FOpenRead | FOpenBin);
+			fd = file_open(info->file, FOpenReadBin);
 			/* quietly skip unreadble files */
-			if (!fd)
+			if (fd < 0)
 				return -1;
 		}
 	}
@@ -248,7 +249,7 @@ int calc_sums(struct file_info* info)
 		if (percents_output->update != 0) {
 			rhash_set_callback(info->rctx, (rhash_callback_t)percents_output->update, info);
 		}
-		res = rhash_file_update(info->rctx, fd);
+		res = rhash_update_fd(info->rctx, fd, RHASH_MAX_FILE_SIZE);
 	}
 	if (res != -1 && !opt.bt_batch_file)
 		rhash_final(info->rctx, 0); /* finalize hashing */
@@ -257,8 +258,8 @@ int calc_sums(struct file_info* info)
 	info->size = info->rctx->msg_size - info->msg_offset;
 	rhash_data.total_size += info->size;
 
-	if (fd && !FILE_ISSTDIN(info->file))
-		fclose(fd);
+	if (fd >= 0 && !FILE_ISSTDIN(info->file))
+		close(fd);
 	return res;
 }
 
@@ -312,7 +313,7 @@ int rename_file_by_embeding_crc32(struct file_info* info)
 	if (FILE_ISSPECIAL(info->file))
 		return 0; /* do nothing on stdin or a command-line message */
 
-	assert((info->rctx->hash_id & RHASH_CRC32) != 0);
+	assert((info->rctx->hash_mask & RHASH_CRC32) != 0);
 	rhash_print(suffix + 2, info->rctx, RHASH_CRC32,
 		(opt.flags & OPT_LOWERCASE ? 0 : RHPR_UPPERCASE));
 
@@ -590,7 +591,7 @@ void run_benchmark(uint64_t hash_mask, unsigned flags)
 	sz_mb = msg_size / (1 << 20); /* size in MiB */
 
 	if (hash_mask && (hash_mask & (hash_mask - 1)) == 0) {
-		hash_name = rhash_get_name(hash_id_to_bit64(hash_mask));
+		hash_name = rhash_get_name(bit64_to_hash_id(hash_mask));
 		if (!hash_name) hash_name = ""; /* unsupported hash function */
 	}
 	RSH_REQUIRE(hash_mask_to_hash_ids(hash_mask, 64, hash_ids, &hash_ids_count) >= 0,

@@ -142,13 +142,19 @@ wchar_t* rhash_wcsdup(const wchar_t* str, const char* srcfile, int srcline);
 #define rsh_tstrdup(str) rsh_strdup(str)
 #endif
 
+#ifndef __has_builtin
+# define __has_builtin(x) 0
+#endif
+
 /* get_ctz - count traling zero bits */
 #if (defined(__GNUC__) && (__GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4))) || \
     (defined(__clang__) && __has_builtin(__builtin_ctz))
 /* macro if GCC >= 3.4 or has clang __builtin_ctz() */
 # define get_ctz(x) __builtin_ctz(x)
+# define get_ctz64(x) __builtin_ctzll(x)
 #else
-unsigned get_ctz(unsigned); /* define as function */
+unsigned get_ctz(unsigned);
+unsigned get_ctz64(uint64_t);
 #endif
 
 /* vector functions */

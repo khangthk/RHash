@@ -1,3 +1,34 @@
+Mon 06 Apr 2026 Aleksey Kravchenko
+	* Bugfix: Fix parsing of config strings on Windows
+
+Wed 14 May 2025 Aleksey Kravchenko
+	* === Version 1.4.6 ===
+
+Tue 13 May 2025 Aleksey Kravchenko
+	* Bugfix: Compilation error with GCC 15
+
+Sat 19 Apr 2025 Aleksey Kravchenko
+	* Speed up file reading while hashing a file
+
+Tue 15 Apr 2025 Aleksey Kravchenko
+	* Bugfix: Fix processing of ./ directory
+	* Support --blake3 option for the BLAKE3 hash function
+
+Tue 18 Mar 2025 Etienne Brateau
+	* Support GNU/Hurd platform for --target argument
+
+Tue 25 Feb 2025 Aleksey Kravchenko
+	* Support Intel SHA1 extension
+
+Wed 16 Oct 2024 Aleksey Kravchenko
+	* Bugfix: Fix librhash function rhash_print_magnet()
+
+Tue 15 Oct 2024 Aleksey Kravchenko
+	* Bugfix: Fix building by gcc 7
+
+Mon 14 Oct 2024 Aleksey Kravchenko
+	* === Version 1.4.5 ===
+
 Thu 03 Oct 2024 Aleksey Kravchenko
 	* Support --one-hash formatting option
 

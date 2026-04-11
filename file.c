@@ -20,6 +20,7 @@
 #include <fcntl.h>  /* _O_RDONLY, _O_BINARY, posix_fadvise */
 
 #if defined(_WIN32) || defined(__CYGWIN__)
+# define WIN32_LEAN_AND_MEAN
 # include <windows.h>
 #if !defined(__CYGWIN__)
 # include <share.h> /* for _SH_DENYWR */
@@ -235,8 +236,13 @@ int file_init(file_t* file, ctpath_t path, unsigned init_flags)
 	tpath_t long_path = get_long_path_if_needed(path);
 #endif
 	memset(file, 0, sizeof(*file));
+	/* strip ./ from the start of the path */
 	if (path[0] == RSH_T('.') && IS_ANY_TSLASH(path[1]))
-		path += 2;
+	{
+		for (path += 2; IS_ANY_TSLASH(path[0]); path++);
+		if (!path[0])
+			path = RSH_T(".");
+	}
 	file->real_path = (tpath_t)path;
 	file->mode = (init_flags & FileMaskModeBits) | FileDontFreeRealPath;
 	if (((init_flags & FileMaskUpdatePrintPath) && opt.path_separator) IF_WINDOWS( || long_path))
@@ -285,7 +291,7 @@ static int file_statw(file_t* file);
  * @param dir_path (nullable) directory path to prepend to printable path
  * @param print_path printable path, which encoding shall be detected
  * @param init_flags bit flags, helping to detect the encoding
- * @return encoding on success, -1 on fail with error code stored in errno
+ * @return encoding on success, -1 on failure with error code stored in errno
  */
 static int detect_path_encoding(file_t* file, wchar_t* dir_path, const char* print_path, unsigned init_flags)
 {
@@ -348,7 +354,7 @@ static int detect_path_encoding(file_t* file, wchar_t* dir_path, const char* pri
  * @param prepend_dir the directory to prepend to the print_path, to construct the file path, can be NULL
  * @param print_path the printable representation of the file path
  * @param init_flags initialization flags
- * @return 0 on success, -1 on fail with error code stored in errno
+ * @return 0 on success, -1 on failure with error code stored in errno
  */
 int file_init_by_print_path(file_t* file, file_t* prepend_dir, const char* print_path, unsigned init_flags)
 {
@@ -438,13 +444,16 @@ static const char* handle_rest_of_path_flags(file_t* file, const char* path, uns
 {
 	if (path == NULL)
 		return ((flags & FPathNotNull) ? (errno == EINVAL ? "(null)" : "(encoding error)") : NULL);
-	if ((flags & FileMaskUpdatePrintPath) != 0 && opt.path_separator) {
-		char* p = (char*)path - 1 + strlen(path);
-		for (; p >= path; p--) {
-			if (IS_ANY_SLASH(*p)) {
-				*p = opt.path_separator;
-				if ((flags & FileInitUpdatePrintPathLastSlash) != 0)
-					break;
+	if ((flags & FileMaskUpdatePrintPath) != 0) {
+		char path_separator = (flags & FileInitUpdatePrintPathToForwardSlashes ? '/' : opt.path_separator);
+		if (path_separator) {
+			char* p = (char*)path - 1 + strlen(path);
+			for (; p >= path; p--) {
+				if (IS_ANY_SLASH(*p)) {
+					*p = path_separator;
+					if ((flags & FileInitUpdatePrintPathLastSlash) != 0)
+						break;
+				}
 			}
 		}
 	}
@@ -611,7 +620,7 @@ void file_swap(file_t* first, file_t* second)
  * @param str the string to insert into/append to the source file path
  * @param operation the operation determinating how to modify the file path, can be one of the values
  *                  FModifyAppendSuffix, FModifyInsertBeforeExtension, FModifyRemoveExtension, FModifyGetParentDir
- * @return allocated and modified file path on success, NULL on fail
+ * @return allocated and modified file path on success, NULL on failure
  */
 static char* get_modified_path(const char* path, const char* str, int operation)
 {
@@ -648,7 +657,7 @@ static char* get_modified_path(const char* path, const char* str, int operation)
  * @param str the string to insert into/append to the source file path
  * @param operation the operation determinating how to modify the file path, can be one of the values
  *                  FModifyAppendSuffix, FModifyInsertBeforeExtension, FModifyRemoveExtension, FModifyGetParentDir
- * @return allocated and modified file path on success, NULL on fail
+ * @return allocated and modified file path on success, NULL on failure
  */
 static tpath_t get_modified_tpath(ctpath_t path, const char* str, int operation)
 {
@@ -688,7 +697,7 @@ static tpath_t get_modified_tpath(ctpath_t path, const char* str, int operation)
  * @param str the string to insert into/append to the source file path
  * @param operation the operation to do on src file, can be one of the values
  *                  FModifyAppendSuffix, FModifyInsertBeforeExtension, FModifyRemoveExtension, FModifyGetParentDir
- * @return 0 on success, -1 on fail with error code stored in errno
+ * @return 0 on success, -1 on failure with error code stored in errno
  */
 int file_modify_path(file_t* dst, file_t* src, const char* str, int operation)
 {
@@ -723,7 +732,7 @@ int file_modify_path(file_t* dst, file_t* src, const char* str, int operation)
  * Retrieve file information (type, size, mtime) into file_t fields.
  *
  * @param file the file information
- * @return 0 on success, -1 on fail with error code stored in errno
+ * @return 0 on success, -1 on failure with error code stored in errno
  */
 static int file_statw(file_t* file)
 {
@@ -771,7 +780,7 @@ static int file_statw(file_t* file)
  *
  * @param file the file information
  * @param fstat_flags bitmask consisting of FileStatModes bits
- * @return 0 on success, -1 on fail with error code stored in errno
+ * @return 0 on success, -1 on failure with error code stored in errno
  */
 int file_stat(file_t* file, int fstat_flags)
 {
@@ -816,11 +825,65 @@ int file_stat(file_t* file, int fstat_flags)
 }
 
 /**
- * Open the file and return its decriptor.
+ * Open the file and return POSIX file descriptor.
  *
- * @param file the file information, including the path
- * @param fopen_flags bitmask consisting of FileFOpenModes bits
- * @return file descriptor on success, NULL on fail with error code stored in errno
+ * On Windows, the file is always opened in binary mode (`_O_BINARY`)
+ * and with `_SH_DENYNO` (shared read/write access).
+ * In read-only mode (`FOpenRead`), the file is opened with a hint for sequential access:
+ * - Windows: Uses `_O_SEQUENTIAL`.
+ * - POSIX: Uses `posix_fadvise(POSIX_FADV_SEQUENTIAL)` if available.
+ *
+ * @param file file information, including the path (must not be NULL)
+ * @param open_flags bitmask of `FOpenRead`, `FOpenWrite`
+ * @return POSIX file descriptor on success, -1 on failure with error code stored in errno
+ */
+int file_open(file_t* file, int open_flags)
+{
+	const int possible_oflags[4] = {
+#if defined(_WIN32)
+		0, _O_RDONLY | _O_BINARY | _O_SEQUENTIAL,
+		_O_WRONLY | _O_BINARY, _O_RDWR | _O_BINARY
+#else
+# if !defined(O_BINARY)
+#  define O_BINARY 0
+# endif
+		0, O_RDONLY | O_BINARY, O_WRONLY | O_BINARY, O_RDWR | O_BINARY
+#endif
+	};
+	const int oflags = possible_oflags[open_flags & FOpenRW];
+	int fd;
+	assert((open_flags & FOpenRW) != 0);
+	if (!file->real_path) {
+		errno = EINVAL;
+		return -1;
+	}
+#ifdef _WIN32
+	{
+		fd = _wsopen(file->real_path, oflags, _SH_DENYNO, 0);
+		if (fd < 0 && errno == EINVAL)
+			errno = ENOENT;
+		return fd;
+	}
+#else
+	fd = open(file->real_path, oflags, 0);
+# if _POSIX_C_SOURCE >= 200112L && defined(POSIX_FADV_SEQUENTIAL)
+	if (fd >= 0)
+		posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+# endif /* _POSIX_C_SOURCE >= 200112L && defined(POSIX_FADV_SEQUENTIAL) */
+	return fd;
+#endif
+}
+
+/**
+ * Open the file and return a standard C file stream pointer.
+ *
+ * On Windows, the file is opened with shared access (`_SH_DENYNO`)
+ * In read-only mode (`FOpenRead`), a hint for sequential access is applied.
+ *
+ * @param file the file information, including the path (must not be NULL)
+ * @param fopen_flags bitmask of `FOpenRead`, `FOpenWrite`, and optionally `FOpenBin`.
+ *                    Must include at least one of `FOpenRead` or `FOpenWrite`.
+ * @return valid `FILE*` stream on success, NULL on failure with error code stored in errno
  */
 FILE* file_fopen(file_t* file, int fopen_flags)
 {
@@ -862,7 +925,7 @@ FILE* file_fopen(file_t* file, int fopen_flags)
  *
  * @param from the source file
  * @param to the destination path
- * @return 0 on success, -1 on fail with error code stored in errno
+ * @return 0 on success, -1 on failure with error code stored in errno
  */
 int file_rename(const file_t* from, const file_t* to)
 {
@@ -883,7 +946,7 @@ int file_rename(const file_t* from, const file_t* to)
  * Rename a given file to *.bak, if it exists.
  *
  * @param file the file to move
- * @return 0 on success, -1 on fail with error code stored in errno
+ * @return 0 on success, -1 on failure with error code stored in errno
  */
 int file_move_to_bak(file_t* file)
 {
@@ -956,7 +1019,7 @@ int file_is_readable(file_t* file)
  *
  * @param list the file_list_t structure to initialize
  * @param file the file to open
- * @return 0 on success, -1 on fail with error code stored in errno
+ * @return 0 on success, -1 on failure with error code stored in errno
  */
 int file_list_open(file_list_t* list, file_t* file)
 {
@@ -1034,7 +1097,7 @@ struct WIN_DIR_t
  * Open directory iterator for reading the directory content.
  *
  * @param dir_path directory path
- * @return pointer to directory stream, NULL on fail with error code stored in errno
+ * @return pointer to directory stream, NULL on failure with error code stored in errno
  */
 WIN_DIR* win_opendir(const char* dir_path)
 {

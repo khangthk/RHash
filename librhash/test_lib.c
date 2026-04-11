@@ -14,21 +14,27 @@
  * PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include <unistd.h>
-#include <stdio.h>
-#include <stdarg.h>
-#include <string.h>
-#include <ctype.h>
-
+#include "test_lib.h"
 #include "byte_order.h"
-#include "rhash_torrent.h"
 #include "test_utils.h"
 
 #ifdef USE_RHASH_DLL
 # define RHASH_API __declspec(dllimport)
 #endif
 #include "rhash.h"
-#include "test_lib.h"
+#include "rhash_torrent.h"
+
+#include <assert.h>
+#include <ctype.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#if defined(_WIN32)
+# include <io.h>
+#endif
 
 /*=========================================================================*
  *                              Test vectors                               *
@@ -177,10 +183,10 @@ const char* ripemd_tests[] = {
 };
 
 /*
-* Two important test-cases (some libraries calculate them incorrectly):
-* GOST94( <100000 characters of 'a'> ) = 5C00CCC2734CDD3332D3D4749576E3C1A7DBAF0E7EA74E9FA602413C90A129FA
-* GOST94( <128 characters of 'U'> ) = 53A3A3ED25180CEF0C1D85A074273E551C25660A87062A52D926A9E8FE5733A4
-*/
+ * Two important test-cases (some libraries calculate them incorrectly):
+ * GOST94( <100000 characters of 'a'> ) = 5C00CCC2734CDD3332D3D4749576E3C1A7DBAF0E7EA74E9FA602413C90A129FA
+ * GOST94( <128 characters of 'U'> ) = 53A3A3ED25180CEF0C1D85A074273E551C25660A87062A52D926A9E8FE5733A4
+ */
 
 /* test vectors from internet, verified by OpenSSL and some other programs */
 const char* gost94_tests[] = {
@@ -481,6 +487,19 @@ const char* blake2b_tests[] = {
 	0
 };
 
+/* verified by b3sum from github.com/BLAKE3-team/BLAKE3 */
+const char* blake3_tests[] = {
+	"", "AF1349B9F5F9A1A6A0404DEA36DCC9499BCB25C9ADC112B7CC9A93CAE41F3262",
+	"a", "17762FDDD969A453925D65717AC3EEA21320B66B54342FDE15128D6CAF21215F",
+	"abc", "6437B3AC38465133FFB63B75273A8DB548C558465D79DB03FD359C6CD5BD9D85",
+	"message digest", "7BC2A2EEB95DDBF9B7ECF6ADCB76B453091C58DC43955E1D9482B1942F08D19B",
+	"abcdefghijklmnopqrstuvwxyz", "2468EEC8894ACFB4E4DF3A51EA916BA115D48268287754290AAE8E9E6228E85F",
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", "8BEE3200BAA9F3A1ACD279F049F914F110E730555FF15109BD59CDD73895E239",
+	"12345678901234567890123456789012345678901234567890123456789012345678901234567890", "F263ACF51621980B9C8DE5DA4A17D314984E05ABE4A21CC83A07FE3E1E366DD1",
+	"The quick brown fox jumps over the lazy dog", "2F1514181AADCCD913ABD94CFA592701A5686AB23F8DF1DFF1B74710FEBC6D4A",
+	0
+};
+
 /* BTIH calculated with filename = "test.txt", verified using uTorrent */
 const char* btih_with_filename_tests[] = {
 	"", "042C8E2D2780B0AFAE6599A02914D6C3F1515B12",
@@ -553,6 +572,7 @@ struct test_vectors_t short_test_vectors[] = {
 	{ RHASH_EDONR512, edonr512_tests },
 	{ RHASH_BLAKE2S, blake2s_tests },
 	{ RHASH_BLAKE2B, blake2b_tests },
+	{ RHASH_BLAKE3, blake3_tests },
 	{ 0, 0 }
 };
 
@@ -625,6 +645,8 @@ static void log_error_impl(int line, const char* format, ...)
 	(log_error_impl(__LINE__, (msg), (a), (b), (c)))
 #define log_error4(msg, a, b, c, d) \
 	(log_error_impl(__LINE__, (msg), (a), (b), (c), (d)))
+#define log_error5(msg, a, b, c, d, e) \
+	(log_error_impl(__LINE__, (msg), (a), (b), (c), (d), (e)))
 
 #define CHECK_NOOP {}
 #define CHECK_IMPL(failed, cmd, msg) \
@@ -671,9 +693,13 @@ static char* hash_data_by_chunks(unsigned hash_id, const char* data, size_t chun
 	}
 
 	ctx = rhash_init(hash_id);
-
-	if ((hash_id & RHASH_BTIH) && (flags & CHDT_SET_FILENAME)) {
-		rhash_torrent_add_file(ctx, "test.txt", (unsigned long long)total_size);
+	if (!ctx) {
+		log_error1("got NULL context for hash_id=0x%08x\n", hash_id);
+		return "";
+	}
+	if ((hash_id == RHASH_BTIH || hash_id == RHASH_ALL_HASHES) && (flags & CHDT_SET_FILENAME)) {
+		CHECK_NE(0, rhash_torrent_add_file(ctx, "test.txt", (unsigned long long)total_size),
+			"failed to add filename");
 	}
 	if (!!(flags & CHDT_REPEAT_SMALL_CHUNK)) {
 		/* repeat the small chunk of data until the total_size is reached */
@@ -876,6 +902,7 @@ static void test_long_strings(void)
 		{ RHASH_EDONR512, "B4A5A255D67869C990FE79B5FCBDA69958794B8003F01FD11E90FEFEC35F22BD84FFA2E248E8B3C1ACD9B7EFAC5BC66616E234A6E938D3526DEE26BD0DE9C562" }, /* verified by eBASH SUPERCOP implementation */
 		{ RHASH_BLAKE2S, "BEC0C0E6CDE5B67ACB73B81F79A67A4079AE1C60DAC9D2661AF18E9F8B50DFA5" }, /* verified by b2sum utility */
 		{ RHASH_BLAKE2B, "98FB3EFB7206FD19EBF69B6F312CF7B64E3B94DBE1A17107913975A793F177E1D077609D7FBA363CBBA00D05F7AA4E4FA8715D6428104C0A75643B0FF3FD3EAF" }, /* verified by b2sum utility */
+		{ RHASH_BLAKE3, "616F575A1B58D4C9797D4217B9730AE5E6EB319D76EDEF6549B46F4EFE31FF8B" }, /* verified by b3sum utility */
 		{ RHASH_GOST12_256, "841AF1A0B2F92A800FB1B7E4AABC8E48763153C448A0FC57C90BA830E130F152" },
 		{ RHASH_GOST12_512, "D396A40B126B1F324465BFA7AA159859AB33FAC02DCDD4515AD231206396A266D0102367E4C544EF47D2294064E1A25342D0CD25AE3D904B45ABB1425AE41095" },
 #ifdef USE_KECCAK
@@ -889,7 +916,7 @@ static void test_long_strings(void)
 	dbg("test long strings\n");
 
 	/* test all algorithms on 1,000,000 characters of 'a' */
-	for (count = 0; count < (sizeof(tests) / sizeof(id_to_hash_t)); count++) {
+	for (count = 0; count < RHASH_COUNTOF(tests); count++) {
 		unsigned flags = (tests[count].hash_id == RHASH_BTIH ? CHDT_SET_FILENAME : CHDT_NO_FLAGS);
 		assert_rep_hash(tests[count].hash_id, 'a', 1000000, tests[count].expected_hash, flags);
 	}
@@ -959,12 +986,17 @@ static void test_results_consistency(void)
 static void test_unaligned_messages_consistency(void)
 {
 	int start, alignment_size;
-	unsigned hash_id;
+	unsigned all_hash_ids[RHASH_HASH_COUNT];
+	size_t count = rhash_get_all_algorithms(RHASH_HASH_COUNT, all_hash_ids);
+	size_t i;
 	dbg("test unaligned messages consistency\n");
+	REQUIRE_NE(RHASH_ERROR, count, "failed to get all algorithms\n");
 
 	/* loop by hash algorithms */
-	for (hash_id = 1; (hash_id & RHASH_ALL_HASHES); hash_id <<= 1) {
+	for (i = 0; i < count; i++) {
+		unsigned hash_id = all_hash_ids[i];
 		char expected_hash[130];
+		REQUIRE_NE(0, hash_id, "bad hash_id == 0\n");
 		REQUIRE_TRUE(rhash_get_digest_size(hash_id) < (int)sizeof(expected_hash), "too big digest size\n");
 
 		alignment_size = (hash_id & (RHASH_TTH | RHASH_TIGER | RHASH_WHIRLPOOL | RHASH_SHA512) ? 8 : 4);
@@ -994,15 +1026,18 @@ static void test_unaligned_messages_consistency(void)
 static void test_chunk_size_consistency(void)
 {
 	char buffer[8192];
-	unsigned hash_id;
-	size_t i;
+	unsigned all_hash_ids[RHASH_HASH_COUNT];
+	size_t count = rhash_get_all_algorithms(RHASH_HASH_COUNT, all_hash_ids);
+	size_t i , j;
 	dbg("test chunk size consistency\n");
+	REQUIRE_NE(RHASH_ERROR, count, "failed to get all algorithms\n");
 
 	for (i = 0; i < sizeof(buffer); i++)
 		buffer[i] = (char)(unsigned char)(i % 255);
 
 	/* loop by hash algorithms */
-	for (hash_id = 1; (hash_id & RHASH_ALL_HASHES); hash_id <<= 1) {
+	for (j = 0; j < count; j++) {
+		unsigned hash_id = all_hash_ids[j];
 		char expected_hash[130];
 		strcpy(expected_hash, hash_data(hash_id, buffer, sizeof(buffer), 0)); /* save hash value */
 		for (i = 0; i < 2; i++) {
@@ -1064,11 +1099,12 @@ static void test_version_sanity(void)
  */
 static void test_generic_assumptions(void)
 {
-	unsigned mask = (1u << RHASH_HASH_COUNT) - 1u;
 	dbg("test generic assumptions\n");
-	if (mask != RHASH_ALL_HASHES) {
-		log_error2("wrong algorithms count %d for the mask 0x%x\n", RHASH_HASH_COUNT, RHASH_ALL_HASHES);
+	if (RHASH_HASH_COUNT < rhash_popcount(RHASH_LOW_HASHES_MASK)) {
+		log_error2("wrong algorithms count %d for low mask 0x%x\n", RHASH_HASH_COUNT, RHASH_LOW_HASHES_MASK);
 	}
+	CHECK_TRUE(RHASH_EXTENDED_BIT & RHASH_ALL_HASHES, "bad RHASH_ALL_HASHES value");
+	CHECK_TRUE(!(RHASH_EXTENDED_BIT & RHASH_LOW_HASHES_MASK), "bad RHASH_LOW_HASHES_MASK value");
 	test_endianness();
 	test_version_sanity();
 }
@@ -1183,7 +1219,7 @@ static void test_get_context(void)
 static void test_import_export(void)
 {
 #if !defined(NO_IMPORT_EXPORT)
-	unsigned hash_mask = RHASH_ALL_HASHES;
+	unsigned export_id = RHASH_ALL_HASHES;
 	uint8_t data[241];
 	size_t i;
 	size_t min_sizes[3] = { 0, 1024, 8192 };
@@ -1196,12 +1232,17 @@ static void test_import_export(void)
 		size_t required_size;
 		size_t exported_size;
 		void* exported_data;
-		rhash ctx = rhash_init(hash_mask);
+		unsigned imported_ids[RHASH_HASH_COUNT];
+		size_t imported_ids_count;
+		size_t j;
+		rhash ctx = rhash_init(export_id);
 		rhash imported_ctx;
-		unsigned hash_id;
+		size_t exported_ids_count = rhash_get_ctx_algorithms(ctx, 0, 0);
+		CHECK_TRUE(exported_ids_count > 0, "wrong number of exported algorithms");
+
 		for (; size < min_size; size += sizeof(data))
 			rhash_update(ctx, data, sizeof(data));
-		if ((hash_mask & RHASH_BTIH) != 0) {
+		if (export_id == RHASH_BTIH || export_id == RHASH_ALL_HASHES) {
 			rhash_torrent_set_program_name(ctx, "test");
 			rhash_torrent_add_announce(ctx, "url1");
 			rhash_torrent_add_announce(ctx, "url2");
@@ -1235,19 +1276,20 @@ static void test_import_export(void)
 		rhash_final(ctx, 0);
 		dbg2("- call rhash_final imported_ctx\n");
 		rhash_final(imported_ctx, 0);
-		dbg2("- verify results\n");
 		exported_data = NULL;
-		for (hash_id = 1; hash_id < hash_mask; hash_id <<= 1) {
-			if ((hash_id & hash_mask) != 0) {
-				static char out1[240], out2[240];
-				rhash_print(out1, ctx, hash_id, RHPR_UPPERCASE);
-				rhash_print(out2, imported_ctx, hash_id, RHPR_UPPERCASE);
-				if (strcmp(out1, out2) != 0) {
-					const char* hash_name = rhash_get_name(hash_id);
-					log_error4("import failed, wrong hash %s != %s for %s,  block size=%u\n",
-						out1, out2, hash_name, (unsigned)size);
-					return;
-				}
+		imported_ids_count = rhash_get_ctx_algorithms(ctx, RHASH_HASH_COUNT, imported_ids);
+		CHECK_EQ(exported_ids_count, imported_ids_count, "wrong number of imported algorithms");
+		dbg2("- verify results\n");
+		for (j = 0; j < imported_ids_count; j++) {
+			unsigned hash_id = imported_ids[j];
+			static char out1[240], out2[240];
+			REQUIRE_NE(0, rhash_print(out1, ctx, hash_id, RHPR_UPPERCASE), "rhash_print failed");
+			REQUIRE_NE(0, rhash_print(out2, imported_ctx, hash_id, RHPR_UPPERCASE), "rhash_print failed");
+			if (strcmp(out1, out2) != 0) {
+				const char* hash_name = rhash_get_name(hash_id);
+				log_error4("import failed, wrong hash %s != %s for %s,  block size=%u\n",
+					out1, out2, hash_name, (unsigned)size);
+				return;
 			}
 		}
 		rhash_free(ctx);
@@ -1256,28 +1298,64 @@ static void test_import_export(void)
 #endif /* !defined(NO_IMPORT_EXPORT) */
 }
 
+static uint64_t make_hash_mask(size_t count, unsigned hash_ids[])
+{
+	uint64_t hash_mask = 0;
+	size_t i;
+	if (count == 1 && hash_ids[0] == RHASH_ALL_HASHES)
+		return RHASH_LOW_HASHES_MASK;
+	for (i = 0; i < count; i++) {
+		if ((RHASH_EXTENDED_BIT & hash_ids[i]) != 0)
+			hash_mask |= I64(1) << (unsigned)(hash_ids[i] & ~RHASH_EXTENDED_BIT);
+		else
+			hash_mask |= hash_ids[i];
+	}
+	return hash_mask;
+}
+
 #define TEST_PATH 0x4000000
 
 /**
  * Verify a magnet link.
  */
-static void assert_magnet(const char* expected,
-	rhash ctx, unsigned mask, int flags)
+static void test_magnet(const char* expected,
+	rhash ctx, int flags, size_t count, unsigned hash_ids[])
 {
-	static char out[240];
+	static char out[2800];
 	const char* path = (flags & TEST_PATH ? "test.txt" : NULL);
-	size_t size;
+	uint64_t hash_mask = make_hash_mask(count, hash_ids);
+	size_t size_calculated = rhash_print_magnet_multi(NULL, 0, path, ctx, flags, count, hash_ids);
+	size_t size_calculated_legacy = (hash_mask < (uint64_t)RHASH_EXTENDED_BIT ?
+		rhash_print_magnet(NULL, path, ctx, (unsigned)hash_mask, flags) : 0);
+	size_t size_printed, size_printed_legacy;
+
+	REQUIRE_TRUE(size_calculated < sizeof(out), "too small buffer for magnet link\n");
+	CHECK_NE(0, size_calculated, "non zero buffer size expected to be returned\n");
+	if (size_calculated_legacy)
+		CHECK_EQ(size_calculated, size_calculated_legacy, "wrong size_calculated_legacy\n");
+
 	flags &= ~TEST_PATH;
-	size = rhash_print_magnet(out, path, ctx, mask, flags);
+	if (size_calculated > 0) {
+		size_printed = rhash_print_magnet_multi(out, size_calculated - 1, path, ctx, flags, count, hash_ids);
+		CHECK_EQ(0, size_printed, "too small buffer error expected, but not occurred\n");
+	}
+	size_printed = rhash_print_magnet_multi(out, size_calculated, path, ctx, flags, count, hash_ids);
+	if (size_calculated_legacy)
+	{
+		size_printed_legacy = rhash_print_magnet(out, path, ctx, (unsigned)hash_mask, flags);
+		CHECK_EQ(size_printed, size_printed_legacy, "wrong size_printed_legacy\n");
+	}
 
 	if (expected && strcmp(expected, out) != 0) {
 		log_error2("\"%s\" != \"%s\"\n", expected, out);
 	} else {
-		size_t size2 = strlen(out) + 1;
-		if (size != size2) {
-			log_error3("rhash_print_magnet returns wrong length %d != %d for \"%s\"\n", (int)size, (int)size2, out);
-		} else if (size != (size2 = rhash_print_magnet(NULL, path, ctx, mask, flags))) {
-			log_error3("rhash_print_magnet(NULL, ...) returns wrong length %d != %d for \"%s\"\n", (int)size2, (int)size, out);
+		size_t length = strlen(out) + 1;
+		if (size_printed != length) {
+			log_error3("rhash_print_magnet returns wrong length %u != %u for \"%s\"\n",
+				(unsigned)size_printed, (unsigned)length, out);
+		} else if (size_printed != size_calculated) {
+			log_error3("rhash_print_magnet(NULL, ...) returns wrong length %u != %u for \"%s\"\n",
+				(unsigned)size_calculated, (unsigned)size_printed, out);
 		}
 	}
 }
@@ -1285,26 +1363,198 @@ static void assert_magnet(const char* expected,
 /**
  * Test printing of magnet links.
  */
-static void test_magnet(void)
+static void test_magnet_links(void)
 {
-	unsigned bit;
+	unsigned hash_ids_all[RHASH_HASH_COUNT];
+	unsigned hash_ids_tth[] = { RHASH_TTH };
+	unsigned hash_ids_md5[] = { RHASH_MD5 };
+	unsigned hash_ids_special[] = { RHASH_ED2K, RHASH_AICH, RHASH_SHA1, RHASH_BTIH };
+	unsigned hash_ids_crc32_tth[2] = { RHASH_CRC32, RHASH_TTH };
+	unsigned hash_id_all_hashes = RHASH_ALL_HASHES;
+	size_t count = rhash_get_all_algorithms(RHASH_HASH_COUNT, hash_ids_all);
+	size_t i;
 	rhash ctx;
-	dbg("test magnet link\n");
-	ctx	= rhash_init(RHASH_ALL_HASHES);
+	dbg("test magnet links\n");
+	ctx	= rhash_init_multi(count, hash_ids_all);
 	rhash_update(ctx, "a", 1);
 	rhash_final(ctx, 0);
 
-	assert_magnet("magnet:?xl=1&dn=test.txt&xt=urn:tree:tiger:czquwh3iyxbf5l3bgyugzhassmxu647ip2ike4y", ctx, RHASH_TTH, RHPR_FILESIZE | TEST_PATH);
-	assert_magnet("magnet:?xl=1&xt=urn:md5:0CC175B9C0F1B6A831C399E269772661", ctx, RHASH_MD5, RHPR_FILESIZE | RHPR_UPPERCASE);
-	assert_magnet("xt=urn:ed2k:bde52cb31de33e46245e05fbdbd6fb24&xt=urn:aich:q336in72uwt7zyk5dxolt2xk5i3xmz5y&xt=urn:sha1:q336in72uwt7zyk5dxolt2xk5i3xmz5y&xt=urn:btih:827cd89846fc132e2e67e29c2784c65443bb4dc1",
-		ctx, RHASH_ED2K | RHASH_AICH | RHASH_SHA1 | RHASH_BTIH, RHPR_NO_MAGNET);
+	dbg2("- test specific magnet links\n");
+	test_magnet("magnet:?xl=1&dn=test.txt&xt=urn:tree:tiger:czquwh3iyxbf5l3bgyugzhassmxu647ip2ike4y",
+		ctx, RHPR_FILESIZE | TEST_PATH, RHASH_COUNTOF(hash_ids_tth), hash_ids_tth);
+	test_magnet("magnet:?xl=1&xt=urn:md5:0CC175B9C0F1B6A831C399E269772661",
+		ctx, RHPR_FILESIZE | RHPR_UPPERCASE, RHASH_COUNTOF(hash_ids_md5), hash_ids_md5);
+	test_magnet(
+		"xt=urn:ed2k:bde52cb31de33e46245e05fbdbd6fb24&"
+		"xt=urn:aich:q336in72uwt7zyk5dxolt2xk5i3xmz5y&"
+		"xt=urn:sha1:q336in72uwt7zyk5dxolt2xk5i3xmz5y&"
+		"xt=urn:btih:827cd89846fc132e2e67e29c2784c65443bb4dc1",
+		ctx, RHPR_NO_MAGNET, RHASH_COUNTOF(hash_ids_special), hash_ids_special);
 
 	/* verify length calculation for all hashes */
-	for (bit = 1; bit < RHASH_ALL_HASHES; bit <<= 1) {
-		assert_magnet(NULL, ctx, bit, RHPR_FILESIZE | RHPR_NO_MAGNET);
+	dbg2("- test magnet link length for all hash ids\n");
+	for (i = 0; i < count; i++) {
+		unsigned hash_id = hash_ids_all[i];
+		test_magnet(NULL, ctx, RHPR_FILESIZE | RHPR_NO_MAGNET, 1, &hash_id);
 	}
-
+	test_magnet(NULL, ctx, RHPR_FILESIZE | RHPR_NO_MAGNET, 1, &hash_id_all_hashes);
 	rhash_free(ctx);
+
+	/* test with two hash functions */
+	dbg2("- test magnet link with two hash functions\n");
+	ctx	= rhash_init_multi(RHASH_COUNTOF(hash_ids_crc32_tth), hash_ids_crc32_tth);
+	rhash_update(ctx, "abc", 3);
+	rhash_final(ctx, 0);
+	test_magnet(
+		"magnet:?xl=3&xt=urn:crc32:352441c2&"
+		"xt=urn:tree:tiger:asd4ujseh5m47pdyb46kbtsqtsgdklbhyxomuia",
+		ctx, RHPR_FILESIZE, 1, &hash_id_all_hashes);
+	rhash_free(ctx);
+}
+
+/*=========================================================================*
+ *                           Test file functions                           *
+ *=========================================================================*/
+
+/**
+ * Create temporary file and return its path.
+ *
+ * @param filename the name of the file
+ * @param content the content of the file
+ * @return the path of the file
+ */
+static const char* write_temp_file(const char* filename, const char* content)
+{
+	static char file_path[1024];
+	const char *tmp_dir = NULL;
+	FILE *fd;
+	size_t content_length = strlen(content);
+	size_t length;
+	int count;
+#ifdef _WIN32
+# define TEST_PATH_SEPARATOR '\\'
+    tmp_dir = getenv("TEMP");
+    if (!tmp_dir) tmp_dir = getenv("TMP");
+#else
+# define TEST_PATH_SEPARATOR '/'
+    tmp_dir = getenv("TMPDIR");
+# ifdef P_tmpdir
+    if (!tmp_dir) tmp_dir = P_tmpdir;
+# endif
+    if (!tmp_dir) tmp_dir = "/tmp";
+#endif
+	if (!tmp_dir) {
+		printf("%s:%d: warning: can't detect temp dir\n", __FILE__, __LINE__);
+		return NULL;
+	}
+	length = strlen(tmp_dir);
+	if ((length + 1) >= sizeof(file_path))
+		return NULL;
+	memcpy(file_path, tmp_dir, length);
+	while (length > 0 && file_path[length - 1] == TEST_PATH_SEPARATOR)
+		file_path[--length] = '\0';
+	assert(length < sizeof(file_path));
+	count = snprintf(file_path + length, sizeof(file_path) - length,
+		"%c%s", TEST_PATH_SEPARATOR, filename);
+	if (count >= (int)(sizeof(file_path)))
+		return NULL;
+
+	fd = fopen(file_path, "w");
+	if (fd != NULL) {
+		length = fwrite(content, 1, content_length, fd);
+		fclose(fd);
+		if (length == content_length)
+			return file_path;
+		log_error1("failed to write to file: %s\n", file_path);
+	} else {
+		log_error1("failed to open file for writing: %s\n", file_path);
+	}
+	return NULL;
+}
+
+struct file_test_ctx {
+	FILE* file_fd;
+	int int_fd;
+	rhash rctx;
+	const char* path;
+};
+
+/**
+ * Test hashing of a file using rhash_file_update().
+ * Report error if calculated hash doesn't coincide with expected value.
+ *
+ * @param fctx the file test context
+ * @param offset the file offset to start hashing from
+ * @param expected the expected hash value
+ */
+static void test_update_by_file(struct file_test_ctx* fctx, size_t offset, const char* expected)
+{
+	static char result[130];
+	assert(fctx->file_fd && fctx->rctx);
+	rhash_reset(fctx->rctx);
+	fseek(fctx->file_fd, (long)offset, SEEK_SET);
+	rhash_file_update(fctx->rctx, fctx->file_fd);
+	rhash_final(fctx->rctx, 0);
+	rhash_print(result, fctx->rctx, 0, RHPR_UPPERCASE);
+	if (strcmp(result, expected) != 0)
+		log_error4("MD5(%s:%d) = %s, expected %s\n", fctx->path, (int)offset, result, expected);
+}
+
+/**
+ * Test hashing of a file using rhash_update_fd().
+ * Report error if calculated hash doesn't coincide with expected value.
+ *
+ * @param fctx the file test context
+ * @param offset the file offset to start hashing from
+ * @param data_size the number of bytes to hash
+ * @param expected the expected hash value
+ */
+static void test_update_by_fd(struct file_test_ctx* fctx, size_t offset, unsigned long long data_size, const char* expected)
+{
+	static char result[130];
+	rhash_reset(fctx->rctx);
+	assert(fctx->int_fd >= 0 && fctx->rctx);
+	lseek(fctx->int_fd, (off_t)offset, SEEK_SET);
+	rhash_update_fd(fctx->rctx, fctx->int_fd, data_size);
+	rhash_final(fctx->rctx, 0);
+	rhash_print(result, fctx->rctx, 0, RHPR_UPPERCASE);
+	if (strcmp(result, expected) != 0)
+		log_error5("MD5(%s:%d:%llu) = %s, expected %s\n", fctx->path, (int)offset, data_size, result, expected);
+}
+
+/**
+ * Test rhash_file_update() and rhash_update_fd().
+ */
+static void test_file_update(void)
+{
+	const char* test_file_content = "012abc";
+	struct file_test_ctx fctx;
+	memset(&fctx, 0 , sizeof(fctx));
+	if (!(fctx.rctx = rhash_init(RHASH_MD5))) {
+		log_error("got NULL context for MD5\n");
+		return;
+	}
+	if (!(fctx.path = write_temp_file("test_lib.txt", test_file_content)))
+		return;
+	fctx.file_fd = fopen(fctx.path, "r");
+	if (fctx.file_fd) {
+		test_update_by_file(&fctx, 0, "CF31AB6B6F7CA8250BB701ADAB94B579");
+		test_update_by_file(&fctx, 3, "900150983CD24FB0D6963F7D28E17F72");
+		test_update_by_file(&fctx, 5, "4A8A08F09D37B73795649038408B5F33");
+		test_update_by_file(&fctx, 6, "D41D8CD98F00B204E9800998ECF8427E");
+		fclose(fctx.file_fd);
+	}
+	fctx.int_fd = open(fctx.path, O_RDONLY);
+	if (fctx.int_fd > 0) {
+		test_update_by_fd(&fctx, 0, RHASH_MAX_FILE_SIZE, "CF31AB6B6F7CA8250BB701ADAB94B579");
+		test_update_by_fd(&fctx, 3, RHASH_MAX_FILE_SIZE, "900150983CD24FB0D6963F7D28E17F72");
+		test_update_by_fd(&fctx, 3, 1, "0CC175B9C0F1B6A831C399E269772661");
+		test_update_by_fd(&fctx, 3, 2, "187EF4436122D1CC2F40DC2B92F0EBA0");
+		test_update_by_fd(&fctx, 4, 1, "92EB5FFEE6AE2FEC3AD71C777531578F");
+		close(fctx.int_fd);
+	}
+	unlink(fctx.path);
+	rhash_free(fctx.rctx);
 }
 
 /**
@@ -1315,18 +1565,35 @@ static void test_magnet(void)
  */
 static unsigned find_hash(const char* name)
 {
-	char buf[30];
-	unsigned hash_id;
-	int i;
+	unsigned hash_ids_all[RHASH_HASH_COUNT];
+	char buf[32];
+	size_t count = rhash_get_all_algorithms(RHASH_HASH_COUNT, hash_ids_all);
+	size_t i;
 
 	if (strlen(name) > (sizeof(buf) - 1)) return 0;
 	for (i = 0; name[i]; i++) buf[i] = toupper(name[i]);
 	buf[i] = 0;
 
-	for (hash_id = 1; (hash_id & RHASH_ALL_HASHES); hash_id <<= 1) {
-		if (strcmp(buf, rhash_get_name(hash_id)) == 0) return hash_id;
-	}
+	for (i = 0; i < count; i++)
+		if (strcmp(buf, rhash_get_name(hash_ids_all[i])) == 0)
+			return hash_ids_all[i];
 	return 0;
+}
+
+/**
+ * Detect and print CPU features.
+ */
+static void print_cpu_features(void)
+{
+#if !defined(NO_HAS_CPU_FEATURE)
+	printf("CPU Features:%s%s%s%s%s%s\n",
+		(rhash_has_cpu_feature(CPU_FEATURE_SSE2) ? " SSE2" : ""),
+		(rhash_has_cpu_feature(CPU_FEATURE_SSE3) ? " SSE3" : ""),
+		(rhash_has_cpu_feature(CPU_FEATURE_SSSE3) ? " SSSE3" : ""),
+		(rhash_has_cpu_feature(CPU_FEATURE_SSE4_1) ? " SSE_4.1" : ""),
+		(rhash_has_cpu_feature(CPU_FEATURE_SSE4_2) ? " SSE_4.2" : ""),
+		(rhash_has_cpu_feature(CPU_FEATURE_SHANI) ? " SHANI" : ""));
+#endif
 }
 
 /**
@@ -1410,6 +1677,7 @@ int main(int argc, char* argv[])
 	test_generic_assumptions();
 	if (print_info) {
 		printf("%s", compiler_flags);
+		print_cpu_features();
 		print_openssl_status();
 	} else if (test_speed) {
 		test_known_strings(hash_id);
@@ -1424,7 +1692,8 @@ int main(int argc, char* argv[])
 		test_id_getters();
 		test_get_context();
 		test_import_export();
-		test_magnet();
+		test_magnet_links();
+		test_file_update();
 		if (g_errors_count == 0)
 			printf("All sums are working properly!\n");
 		fflush(stdout);

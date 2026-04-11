@@ -69,9 +69,11 @@ enum FileModeBits {
 	FileInitRunFstat = 0x4000,
 	FileInitRunLstat = 0x8000,
 	FileInitUpdatePrintPathLastSlash = 0x10000,
-	FileInitUpdatePrintPathSlashes = 0x20000,
-	FileInitUseRealPathAsIs = 0x40000,
-	FileMaskUpdatePrintPath = (FileInitUpdatePrintPathLastSlash | FileInitUpdatePrintPathSlashes),
+	FileInitUpdatePrintPathToForwardSlashes = 0x20000,
+	FileInitUpdatePrintPathSlashes = 0x40000,
+	FileInitUseRealPathAsIs = 0x80000,
+	FileMaskUpdatePrintPath = (FileInitUpdatePrintPathLastSlash |
+		FileInitUpdatePrintPathToForwardSlashes | FileInitUpdatePrintPathSlashes),
 	FileMaskStatBits = (FileIsDir | FileIsLnk | FileIsReg | FileIsInaccessible),
 	FileMaskIsSpecial = (FileIsData | FileIsList | FileIsStdStream),
 	FileMaskModeBits = (FileMaskStatBits | FileIsRoot | FileMaskIsSpecial | FileContentIsUtf8),
@@ -132,6 +134,7 @@ enum FileFOpenModes {
 	FOpenWriteBin = FOpenWrite | FOpenBin,
 	FOpenRWBin    = FOpenRW | FOpenBin,
 };
+int file_open(file_t* file, int open_flags);
 FILE* file_fopen(file_t* file, int fopen_flags);
 
 int file_rename(const file_t* from, const file_t* to);

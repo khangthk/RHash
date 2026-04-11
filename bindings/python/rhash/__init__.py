@@ -44,6 +44,7 @@ from .rhash import (
     SHA3_512,
     BLAKE2S,
     BLAKE2B,
+    BLAKE3,
     SNEFRU128,
     SNEFRU256,
     RHash,
@@ -52,6 +53,7 @@ from .rhash import (
     hash_file,
     make_magnet,
     get_librhash_version,
+    get_librhash_version_int,
 )
 
 # Import deprecated constants and functions
@@ -90,6 +92,7 @@ __all__ = [
     "SHA3_512",
     "BLAKE2S",
     "BLAKE2B",
+    "BLAKE3",
     "SNEFRU128",
     "SNEFRU256",
     "RHash",
@@ -98,6 +101,7 @@ __all__ = [
     "hash_file",
     "make_magnet",
     "get_librhash_version",
+    "get_librhash_version_int",
     "SHA224",
     "SHA256",
     "SHA384",

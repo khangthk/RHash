@@ -4,6 +4,7 @@
 
 #include "byte_order.h"
 #include "util.h"
+#include <limits.h>
 
 /* first some magic to convert a macro value to a string */
 #define STRINGIZE_ARG(x) #x
@@ -121,6 +122,15 @@ char* compiler_flags = "Compile-time flags:"
 #endif
 #ifdef sparc
 	" sparc"
+#endif
+#ifdef __sw_64
+	" __sw_64"
+#endif
+#ifdef __sw_64__
+	" __sw_64__"
+#endif
+#ifdef sw_64
+	" sw_64"
 #endif
 #ifdef _ARCH_PPC
 	" _ARCH_PPC"
@@ -267,7 +277,6 @@ char* compiler_flags = "Compile-time flags:"
 	" __MACH__"
 #endif
 
-#include <limits.h>
 #ifdef __GLIBC__ /* GLIBC >= 6 */
 	" __GLIBC__"
 	" (__GLIBC__=" EXPAND_TO_STRING(__GLIBC__) ",__GLIBC_MINOR__=" EXPAND_TO_STRING(__GLIBC_MINOR__) ")"
@@ -295,6 +304,9 @@ char* compiler_flags = "Compile-time flags:"
 #ifdef OPENSSL_RUNTIME
 	" OPENSSL_RUNTIME"
 #endif
+#ifdef NO_ATOMIC_BUILTINS
+	" NO_ATOMIC_BUILTINS"
+#endif
 #ifdef HAS_WIN32_ALIGNED_ALLOC
 	" HAS_WIN32_ALIGNED_ALLOC"
 #endif
@@ -309,6 +321,12 @@ char* compiler_flags = "Compile-time flags:"
 #endif
 
 /* cpu features */
+#ifdef HAS_GCC_INTEL_CPUID
+	" HAS_GCC_INTEL_CPUID"
+#endif
+#ifdef HAS_MSVC_INTEL_CPUID
+	" HAS_MSVC_INTEL_CPUID"
+#endif
 #ifdef CPU_X64
 	" CPU_X64"
 #endif

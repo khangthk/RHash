@@ -298,12 +298,11 @@ enum HashNameMatchModes {
  *                   allowed.
  * @return id of hash function if found, zero otherwise
  */
-static unsigned bsd_hash_name_to_id(const char* name, unsigned length, enum HashNameMatchModes match_mode)
+static unsigned bsd_hash_name_to_id(const char* name, size_t length, enum HashNameMatchModes match_mode)
 {
 #define code2mask_size (19 * 2)
 	static unsigned code2mask[code2mask_size] = {
 		FOURC2U('A', 'I', 'C', 'H'), RHASH_AICH,
-		FOURC2U('B', 'L', 'A', 'K'), (RHASH_BLAKE2S | RHASH_BLAKE2B),
 		FOURC2U('B', 'T', 'I', 'H'), RHASH_BTIH,
 		FOURC2U('C', 'R', 'C', '3'), (RHASH_CRC32 | RHASH_CRC32C),
 		FOURC2U('E', 'D', '2', 'K'), RHASH_ED2K,
@@ -332,9 +331,15 @@ static unsigned bsd_hash_name_to_id(const char* name, unsigned length, enum Hash
 	/* quick fix to detect "RMD160" as RIPEMD160 */
 	if (code == FOURC2U('R', 'M', 'D', '1'))
 		return (length == 6 && name[4] == '6' && name[5] == '0' ? RHASH_RIPEMD160 : 0);
-	for (i = 0; code2mask[i] != code; i += 2)
-		if (i >= (code2mask_size - 2)) return 0;
-	hash_mask = code2mask[i + 1];
+	if (code == FOURC2U('B', 'L', 'A', 'K')) {
+		if (length == 6 && name[4] == 'E' && name[5] == '3')
+			return RHASH_BLAKE3;
+		hash_mask = RHASH_BLAKE2S | RHASH_BLAKE2B;
+	} else {
+		for (i = 0; code2mask[i] != code; i += 2)
+			if (i >= (code2mask_size - 2)) return 0;
+		hash_mask = code2mask[i + 1];
+	}
 	i = get_ctz(hash_mask);
 	if (length <= 4)
 	{
@@ -512,12 +517,12 @@ static int match_hash_tokens(struct hash_token* token, const char* format, unsig
 			/* the name should contain alphanumeric or '-' symbols, but */
 			/* actually the loop shall stop at characters [:& \(\t] */
 			for (; (begin[len] <= '9' ? begin[len] >= '0' || begin[len] == '-' : begin[len] >= 'A'); len++) {
-				if (len >= 20)
+				if ((size_t)len >= (sizeof(buf) - 1))
 					return ResFailed; /* limit name length */
 				buf[len] = toupper(begin[len]);
 			}
 			buf[len] = '\0';
-			token->expected_hash_id = bsd_hash_name_to_id(buf, len, ExactMatch);
+			token->expected_hash_id = bsd_hash_name_to_id(buf, (size_t)len, ExactMatch);
 			if (!token->expected_hash_id)
 				return ResFailed;
 			token->hash_type = FmtAll;
@@ -767,7 +772,7 @@ static int parse_magnet_url(struct hash_token* token)
 				break;
 			case THREEC2U('x', 't', '='): /* a file hash */
 				{
-					int i;
+					uint64_t hash_mask;
 					/* find last ':' character (hash name can be complex like tree:tiger) */
 					for (hf_end = param_end - 1; *hf_end != ':' && hf_end > token->begin; hf_end--);
 
@@ -778,13 +783,17 @@ static int parse_magnet_url(struct hash_token* token)
 							FOURC2U('u', 'r', 'n', ':'))
 						return ResFailed;
 					/* find hash by its magnet link specific URN name  */
-					for (i = 0; i < RHASH_HASH_COUNT; i++) {
-						const char* urn = rhash_get_magnet_name(1 << i);
+					for (hash_mask = get_all_supported_hash_mask(); hash_mask; hash_mask &= hash_mask - 1) {
+						uint64_t bit64 = hash_mask & -hash_mask;
+						unsigned hash_id = bit64_to_hash_id(bit64);
+						const char* urn = rhash_get_magnet_name(hash_id);
 						size_t len = hf_end - token->begin;
-						if (strncmp(token->begin, urn, len) == 0 && urn[len] == '\0')
+						if (strncmp(token->begin, urn, len) == 0 && urn[len] == '\0') {
+							token->expected_hash_id = hash_id;
 							break;
+						}
 					}
-					if (i >= RHASH_HASH_COUNT) {
+					if (!hash_mask) {
 						if (opt.verbose) {
 							*hf_end = '\0';
 							log_warning(_("unknown hash in magnet link: %s\n"), token->begin);
@@ -792,7 +801,6 @@ static int parse_magnet_url(struct hash_token* token)
 						return ResFailed;
 					}
 					token->begin = hf_end + 1;
-					token->expected_hash_id = 1 << i;
 					token->hash_type = (FmtHex | FmtBase32);
 					if (!match_hash_tokens(token, "\3", 0))
 						return ResFailed;
@@ -1040,7 +1048,7 @@ unsigned get_crc32(struct rhash_context* ctx)
 static int do_hash_sums_match(struct hash_parser* parser, struct rhash_context* ctx)
 {
 	uint64_t hash_mask = parser->hash_mask;
-	unsigned unverified_mask;
+	uint64_t unverified_mask;
 	unsigned printed;
 	char hex[132], base32[104], base64[88];
 	int j;
@@ -1059,7 +1067,7 @@ static int do_hash_sums_match(struct hash_parser* parser, struct rhash_context* 
 	if (parser->hashes_num == 0)
 		return !HP_FAILED(parser->bit_flags);
 
-	unverified_mask = (1 << parser->hashes_num) - 1;
+	unverified_mask = ((uint64_t)1 << parser->hashes_num) - 1;
 
 	while(hash_mask && unverified_mask) {
 		uint64_t bit64 = hash_mask & -hash_mask;
@@ -1076,7 +1084,7 @@ static int do_hash_sums_match(struct hash_parser* parser, struct rhash_context* 
 			int comparision_mode;
 
 			/* skip already verified message digests and message digests of different size */
-			if (!(unverified_mask & (1 << j)) || !(hv->hash_mask & bit64))
+			if (!(unverified_mask & ((uint64_t)1 << j)) || !(hv->hash_mask & bit64))
 				continue;
 			comparision_mode = 0;
 			bit_length = rhash_get_digest_size(hash_id) * 8;
@@ -1119,7 +1127,7 @@ static int do_hash_sums_match(struct hash_parser* parser, struct rhash_context* 
 			if (!is_hash_string_equal(calculated_hash, expected_hash, hv->length, comparision_mode))
 				continue;
 
-			unverified_mask &= ~(1 << j); /* mark the j-th message digest as verified */
+			unverified_mask &= ~((uint64_t)1 << j); /* mark the j-th message digest as verified */
 			parser->found_hash_ids |= bit64;
 
 			/* end the loop if all message digests were successfully verified */
@@ -1461,7 +1469,8 @@ static int hash_parser_process_file(struct hash_parser *parser, file_set* files)
 			if (files)
 			{
 				/* put UTF8-encoded file path into the file set */
-				const char* path = file_get_print_path(&parser->parsed_path, FPathUtf8);
+				const char* path = file_get_print_path(&parser->parsed_path,
+					FPathUtf8 | FileInitUpdatePrintPathToForwardSlashes);
 				if (path)
 					file_set_add_name(files, path);
 			}
